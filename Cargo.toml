@@ -1,0 +1,24 @@
+[package]
+name = "epubicus"
+version = "0.1.0"
+edition = "2024"
+authors = ["fukuyori <self@spumoni.org>"]
+description = "Translate English EPUB files to Japanese with local Ollama (or OpenAI / Claude), preserving inline formatting"
+repository = "https://github.com/fukuyori/epubicus.git"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+quick-xml = "0.38"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+walkdir = "2"
+zip = "6"

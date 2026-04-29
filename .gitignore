@@ -1,0 +1,42 @@
+# Rust build artifacts
+/target
+/target-*
+
+# Cargo
+Cargo.lock.bak
+
+# Editor/IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# epubicus runtime artifacts (test inputs and outputs that shouldn't be tracked)
+*.cache/
+*.ja.epub
+*.partial-ja.epub
+glossary.json
+glossary.candidates.json
+glossary-review.md
+*.report.json
+
+# Local config and secrets
+epubicus.toml
+.env
+.env.*
+!.env.example
+
+# Sample / test EPUB files dropped at the project root
+/book.epub
+/*.epub
+!/tests/fixtures/*.epub
+
+# Misc
+/test/
