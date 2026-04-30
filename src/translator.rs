@@ -124,6 +124,7 @@ pub(crate) struct Translator {
     pub(crate) dry_run: bool,
     concurrency: usize,
     pub(crate) fallback_count: usize,
+    passthrough_on_validation_failure: bool,
 }
 
 pub(crate) enum Translation {
@@ -146,6 +147,7 @@ struct TranslationJobResult {
     provider: Provider,
     model: String,
     fallback_used: bool,
+    cache_translation: bool,
 }
 
 impl Translator {
@@ -265,6 +267,7 @@ impl Translator {
             dry_run: args.dry_run,
             concurrency,
             fallback_count: 0,
+            passthrough_on_validation_failure: args.passthrough_on_validation_failure,
         })
     }
 
@@ -286,9 +289,11 @@ impl Translator {
         let job_count = jobs.len();
         let backend = self.backend.clone();
         let fallback_backend = self.fallback_backend.clone();
+        let passthrough_on_validation_failure = self.passthrough_on_validation_failure;
         run_translation_jobs(
             backend,
             fallback_backend,
+            passthrough_on_validation_failure,
             self.concurrency,
             jobs,
             progress,
@@ -303,11 +308,15 @@ impl Translator {
                     model: result.model,
                     at: chrono::Utc::now().to_rfc3339(),
                 };
-                self.cache.insert(record)?;
-                translations[result.index] = Some(Translation::Translated {
-                    text: result.translated,
-                    from_cache: false,
-                });
+                if result.cache_translation {
+                    self.cache.insert(record)?;
+                    translations[result.index] = Some(Translation::Translated {
+                        text: result.translated,
+                        from_cache: false,
+                    });
+                } else {
+                    translations[result.index] = Some(Translation::Original);
+                }
                 Ok(())
             },
         )?;
@@ -417,7 +426,12 @@ impl Translator {
             key: String::new(),
         };
         let result =
-            run_translation_job_with_fallback(&self.backend, self.fallback_backend.as_ref(), job)?;
+            run_translation_job_with_fallback(
+                &self.backend,
+                self.fallback_backend.as_ref(),
+                self.passthrough_on_validation_failure,
+                job,
+            )?;
         Ok((
             result.translated,
             result.provider,
@@ -430,6 +444,7 @@ impl Translator {
 fn run_translation_job_with_fallback(
     backend: &TranslationBackend,
     fallback_backend: Option<&TranslationBackend>,
+    passthrough_on_validation_failure: bool,
     job: TranslationJob,
 ) -> Result<TranslationJobResult> {
     let primary_job = job.clone();
@@ -452,6 +467,21 @@ fn run_translation_job_with_fallback(
             result.fallback_used = true;
             Ok(result)
         }
+        Err(err) if passthrough_on_validation_failure && is_translation_validation_error(&err) => {
+            eprintln!(
+                "warning: keeping original source after validation failure from {}: {err}",
+                backend.provider
+            );
+            Ok(TranslationJobResult {
+                index: job.index,
+                key: job.key,
+                translated: job.source,
+                provider: backend.provider,
+                model: backend.model.clone(),
+                fallback_used: false,
+                cache_translation: false,
+            })
+        }
         Err(err) => Err(err),
     }
 }
@@ -464,9 +494,15 @@ pub(crate) fn is_refusal_validation_error(err: &anyhow::Error) -> bool {
     })
 }
 
+fn is_translation_validation_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains("translation validation failed"))
+}
+
 fn run_translation_jobs<F>(
     backend: TranslationBackend,
     fallback_backend: Option<TranslationBackend>,
+    passthrough_on_validation_failure: bool,
     concurrency_limit: usize,
     jobs: Vec<TranslationJob>,
     mut progress: Option<&mut ProgressReporter>,
@@ -486,8 +522,12 @@ where
         let job_count = jobs.len();
         let mut completed = 0usize;
         for job in jobs {
-            let result =
-                run_translation_job_with_fallback(&backend, fallback_backend.as_ref(), job)?;
+            let result = run_translation_job_with_fallback(
+                &backend,
+                fallback_backend.as_ref(),
+                passthrough_on_validation_failure,
+                job,
+            )?;
             on_result(result)?;
             completed += 1;
             if let Some(progress) = progress.as_mut() {
@@ -513,8 +553,12 @@ where
             let fallback_backend = fallback_backend.clone();
             scope.spawn(move || {
                 while let Ok(job) = worker_rx.recv() {
-                    let result =
-                        run_translation_job_with_fallback(&backend, fallback_backend.as_ref(), job);
+                    let result = run_translation_job_with_fallback(
+                        &backend,
+                        fallback_backend.as_ref(),
+                        passthrough_on_validation_failure,
+                        job,
+                    );
                     if result_tx.send(result).is_err() {
                         break;
                     }
@@ -599,6 +643,7 @@ impl TranslationBackend {
             provider: self.provider,
             model: self.model.clone(),
             fallback_used: false,
+            cache_translation: true,
         })
     }
 

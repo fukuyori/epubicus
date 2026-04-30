@@ -64,6 +64,7 @@ $env:EPUBICUS_NUM_CTX = "8192"
 $env:EPUBICUS_TIMEOUT_SECS = "900"
 $env:EPUBICUS_RETRIES = "3"
 $env:EPUBICUS_MAX_CHARS_PER_REQUEST = "3500"
+$env:EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE = "true"
 
 # Ollama is usually safest at 1 while validating output quality.
 # Increase only if the local model/server has enough headroom.
@@ -85,6 +86,8 @@ function New-EpubicusLocalTranslateArgs {
     )
     if ($PartialFromCache) {
         $args += "--partial-from-cache"
+    } else {
+        $args += "--passthrough-on-validation-failure"
     }
     if ($From -gt 0) {
         $args += @("--from", "$From")

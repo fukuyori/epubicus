@@ -89,6 +89,7 @@ export EPUBICUS_TIMEOUT_SECS="900"
 export EPUBICUS_RETRIES="3"
 export EPUBICUS_MAX_CHARS_PER_REQUEST="3500"
 export EPUBICUS_CONCURRENCY="2"
+export EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE="true"
 
 show_epubicus_local_commands() {
     echo
@@ -101,11 +102,11 @@ show_epubicus_local_commands() {
     echo
     echo "Local page-range check:"
     echo "invoke_epubicus_local_page_check"
-    echo "cargo run -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --from $FROM --to $TO --keep-cache --output \"\$OutputEpub\""
+    echo "cargo run -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --from $FROM --to $TO --keep-cache --output \"\$OutputEpub\" --passthrough-on-validation-failure"
     echo
     echo "Local full conversion:"
     echo "invoke_epubicus_local_full"
-    echo "cargo run -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --keep-cache --output \"\$OutputEpub\""
+    echo "cargo run -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --keep-cache --output \"\$OutputEpub\" --passthrough-on-validation-failure"
     echo
     echo "Assemble from cache only:"
     echo "invoke_epubicus_assemble_from_cache"
@@ -120,6 +121,7 @@ invoke_epubicus_local_page_check() {
         --to "$TO" \
         --keep-cache \
         --output "$OutputEpub" \
+        --passthrough-on-validation-failure \
         "$@"
 }
 
@@ -128,6 +130,7 @@ invoke_epubicus_local_full() {
         --cache-root "$CacheRoot" \
         --keep-cache \
         --output "$OutputEpub" \
+        --passthrough-on-validation-failure \
         "$@"
 }
 

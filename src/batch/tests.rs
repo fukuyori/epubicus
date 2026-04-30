@@ -1443,6 +1443,7 @@ fn common_args(cache_root: PathBuf) -> CommonArgs {
         keep_cache: true,
         usage_only: false,
         partial_from_cache: false,
+        passthrough_on_validation_failure: false,
         dry_run: false,
     }
 }

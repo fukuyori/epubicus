@@ -351,6 +351,7 @@ CLI arguments take precedence over environment variables.
 | `--clear-cache` | none | false | Delete this input EPUB's cache before translating |
 | `-k, --keep-cache` | none | false | Keep the cache after a successful completion (default: cache is auto-deleted) |
 | `-u, --usage-only` | none | false | Do not call a provider; only print estimated API requests and tokens for the selected pages |
+| `--passthrough-on-validation-failure` | `EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE` | false | Keep the original block in the current output after validation retries are exhausted. It is not cached, so it can be retried later. Useful for TOC/index entries where preserving links and inline structure is safer than aborting |
 
 Provider-specific `--model` defaults:
 

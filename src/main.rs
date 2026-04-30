@@ -573,6 +573,7 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            passthrough_on_validation_failure: false,
             dry_run: true,
         };
         let cache = CacheStore::from_args(&input, &common)?;
@@ -997,6 +998,7 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            passthrough_on_validation_failure: false,
             dry_run: false,
         };
         let source = "This paragraph should be translated into Japanese.";
@@ -1046,6 +1048,7 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            passthrough_on_validation_failure: false,
             dry_run: false,
         };
         let mut cache = CacheStore::from_args(&input, &args)?;
@@ -1112,6 +1115,7 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: true,
+            passthrough_on_validation_failure: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;
@@ -1160,6 +1164,7 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            passthrough_on_validation_failure: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;
@@ -1201,6 +1206,7 @@ mod tests {
             keep_cache: true,
             usage_only: false,
             partial_from_cache: false,
+            passthrough_on_validation_failure: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;
@@ -1241,6 +1247,7 @@ mod tests {
             keep_cache: false,
             usage_only: true,
             partial_from_cache: false,
+            passthrough_on_validation_failure: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;

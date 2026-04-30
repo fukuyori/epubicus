@@ -126,6 +126,9 @@ pub(crate) struct CommonArgs {
     /// Create a partial EPUB from cached translations and keep cache misses unchanged.
     #[arg(long = "partial-from-cache")]
     pub(crate) partial_from_cache: bool,
+    /// After validation retries are exhausted, keep the original block instead of aborting.
+    #[arg(long, env = "EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE")]
+    pub(crate) passthrough_on_validation_failure: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

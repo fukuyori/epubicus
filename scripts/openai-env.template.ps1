@@ -64,6 +64,7 @@ $env:EPUBICUS_TIMEOUT_SECS = "900"
 $env:EPUBICUS_RETRIES = "3"
 $env:EPUBICUS_MAX_CHARS_PER_REQUEST = "3500"
 $env:EPUBICUS_CONCURRENCY = "$Concurrency"
+$env:EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE = "true"
 
 if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
     Write-Warning "OPENAI_API_KEY is not set. Set it before running OpenAI API commands:"
