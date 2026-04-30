@@ -493,6 +493,11 @@ fn import_output_line(
     if item.source_hash != hash_text(&item.source_text) {
         bail!("work item source_hash does not match source_text");
     }
+    if let Some(cached) = cache.peek(&item.cache_key)
+        && validate_translation_response(&item.source_text, cached).is_ok()
+    {
+        return Ok(ImportLineStatus::AlreadyCached);
+    }
     if let Some(error) = line.error {
         bail!("batch output error: {error}");
     }

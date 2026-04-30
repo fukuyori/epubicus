@@ -127,6 +127,8 @@ cargo run -- batch run .\book.epub --provider openai --model gpt-5-mini --wait -
 
 未翻訳が残る主な原因は、未キャッシュのブロックがある状態で `--partial-from-cache` によって組み立てた場合、またはモデル出力が検証で rejected / failed になった場合です。
 
+Batch API 実行後の復旧判断と詳細手順は [OpenAI Batch 翻訳の復旧手順](batch-recovery.ja.md) を参照してください。
+
 まず状態を確認します。
 
 ```powershell

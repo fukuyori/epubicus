@@ -6,6 +6,7 @@
 #   chmod +x scripts/claude-env.sh
 #   export ANTHROPIC_API_KEY="..."
 #   scripts/claude-env.sh ./book.epub
+#   scripts/claude-env.sh ./book.epub -- --glossary ./glossary.json
 
 set -eu
 
@@ -28,6 +29,7 @@ while [ "$#" -gt 0 ]; do
         --concurrency) CONCURRENCY="$2"; shift 2 ;;
         --usage-only) USAGE_ONLY="1"; shift ;;
         --no-run) NO_RUN="1"; shift ;;
+        --) shift; break ;;
         -*) echo "unknown option: $1" >&2; return 2 2>/dev/null || exit 2 ;;
         *)
             if [ -z "$INPUT_PATH" ]; then INPUT_PATH="$1"; shift; else echo "unexpected argument: $1" >&2; return 2 2>/dev/null || exit 2; fi
@@ -60,7 +62,7 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 
 invoke_epubicus_claude() {
-    set -- translate "$InputEpub" --cache-root "$CacheRoot" --keep-cache --output "$OutputEpub"
+    set -- translate "$InputEpub" --cache-root "$CacheRoot" --keep-cache --output "$OutputEpub" "$@"
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
     if [ "$TO" -gt 0 ]; then set -- "$@" --to "$TO"; fi
     if [ "$USAGE_ONLY" = "1" ]; then set -- "$@" --usage-only; fi
@@ -72,11 +74,14 @@ echo "InputEpub  = $InputEpub"
 echo "OutputEpub = $OutputEpub"
 echo "CacheRoot  = $CacheRoot"
 echo "Model      = $EPUBICUS_MODEL"
+if [ "$#" -gt 0 ]; then
+    echo "ExtraArgs  = $*"
+fi
 echo
 echo "Normal Claude conversion:"
 echo "invoke_epubicus_claude"
 echo
 
 if [ "$NO_RUN" = "0" ]; then
-    invoke_epubicus_claude
+    invoke_epubicus_claude "$@"
 fi

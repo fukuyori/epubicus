@@ -158,6 +158,10 @@ scripts/openai-batch-env.sh ./book.epub --from 3 --to 3
 See [docs/operation-guide.ja.md](docs/operation-guide.ja.md) for a practical
 Japanese workflow guide covering local Ollama, normal OpenAI/Claude API runs,
 OpenAI Batch API runs, cache recovery, and cost checks.
+Check OpenAI API usage at <https://platform.openai.com/usage> and billing at
+<https://platform.openai.com/settings/organization/billing/overview>.
+Multilingual input/output support is planned in
+[docs/multilingual-design.md](docs/multilingual-design.md).
 
 Translation results are cached per-input EPUB under an OS-standard cache root (Windows: `%LOCALAPPDATA%\epubicus\cache`, Unix: `~/.cache/epubicus`). Each input gets its own subdirectory named after the SHA-256 hash of its bytes, with `manifest.json` and `translations.jsonl` inside.
 
@@ -287,6 +291,8 @@ cargo run -- translate .\book.epub --partial-from-cache --keep-cache
 current EPUB extraction, `work_items.jsonl`, and the translation cache. Missing
 or invalid items can be retried remotely with `batch retry-requests` or moved
 to local translation with `batch reroute-local` and `batch translate-local`.
+For the full recovery checklist, see
+[docs/batch-recovery.md](docs/batch-recovery.md).
 
 If the remote batch returns failed or rejected items, either create a retry file
 for later remote handling or switch the remaining work to a local provider:

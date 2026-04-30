@@ -43,6 +43,8 @@ cargo run -- translate .\book.epub -o .\book.ja.epub --provider openai --model g
 cargo run -- translate .\book.epub -p openai -m gpt-5-mini -j 4 --usage-only
 ```
 
+OpenAI API の実際の使用状況は <https://platform.openai.com/usage>、請求状況は <https://platform.openai.com/settings/organization/billing/overview> で確認できます。
+
 よく使う設定は PowerShell セッションで一度だけ `EPUBICUS_*` 環境変数に入れておくと、毎回長いオプションを書かずに済みます。
 
 ```powershell
@@ -119,6 +121,7 @@ cargo run -- test      <INPUT.epub> --from N --to M [OPTIONS]
 cargo run -- inspect   <INPUT.epub>
 cargo run -- toc       <INPUT.epub>
 cargo run -- glossary  <INPUT.epub> [-o glossary.json]
+cargo run -- batch     <SUBCOMMAND>
 cargo run -- cache     <SUBCOMMAND>
 ```
 
@@ -131,6 +134,18 @@ cargo run -- cache     <SUBCOMMAND>
 `toc` は EPUB3 `nav.xhtml` または EPUB2 NCX の目次を、階層インデントとリンク先付きで表示します。
 
 `glossary` は固有名詞や専門用語の候補を JSON に出力します。
+
+`batch` は OpenAI Batch API 用の非同期翻訳ワークフローを管理します。`batch run` は準備、送信、状態確認、取得、取り込み、検証をまとめて実行します。途中で待機をやめた場合やリモート側で失敗・未完了が残った場合は、まず `batch reroute-local` で対象を `local_pending` にマークし、次に `batch translate-local` でその `local_pending` を Ollama などの通常 provider で翻訳します。`reroute-local` は対象選択だけを行い、翻訳はしません。
+
+未完了分をローカルに回す例:
+
+```powershell
+cargo run -- batch health .\book.epub
+cargo run -- batch reroute-local .\book.epub --remaining --priority short-first
+cargo run -- batch translate-local .\book.epub --provider ollama --model qwen3:14b --limit 100
+cargo run -- batch verify .\book.epub
+cargo run -- translate .\book.epub --partial-from-cache --keep-cache -o .\book_jp.epub
+```
 
 ## オプション一覧
 

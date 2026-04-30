@@ -12,6 +12,10 @@
 #     Invoke-EpubicusLocalPageCheck
 #     Invoke-EpubicusLocalFull
 #     Invoke-EpubicusAssembleFromCache
+#
+#   Pass additional epubicus translate options:
+#     .\scripts\local-ollama-env.ps1 .\test\sample.epub -ExtraArgs @("--glossary", ".\glossary.json")
+#     .\scripts\local-ollama-env.ps1 .\test\sample.epub --glossary .\glossary.json
 
 param(
     [Parameter(Position = 0)]
@@ -24,7 +28,12 @@ param(
 
     [int]$To = 3,
 
-    [switch]$NoRun
+    [string[]]$ExtraArgs = @(),
+
+    [switch]$NoRun,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$PassthroughArgs = @()
 )
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -41,6 +50,7 @@ $inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($global:InputEpub
 $inputExtension = [System.IO.Path]::GetExtension($global:InputEpub)
 $global:OutputEpub = Join-Path $inputDir "$inputBaseName`_jp$inputExtension"
 $global:CacheRoot = Join-Path $ProjectRoot ".local-ollama-cache"
+$ExtraArgs = @($ExtraArgs) + @($PassthroughArgs)
 
 # Local provider defaults.
 $env:EPUBICUS_PROVIDER = "ollama"
@@ -59,28 +69,53 @@ $env:EPUBICUS_MAX_CHARS_PER_REQUEST = "3500"
 # Increase only if the local model/server has enough headroom.
 $env:EPUBICUS_CONCURRENCY = "2"
 
-# Optional API settings. Leave unset for local-only runs.
-# $env:OPENAI_API_KEY = "sk-..."
-# $env:EPUBICUS_PROVIDER = "openai"
-# $env:EPUBICUS_MODEL = "gpt-5-mini"
+function New-EpubicusLocalTranslateArgs {
+    param(
+        [switch]$PartialFromCache,
+        [int]$From = 0,
+        [int]$To = 0
+    )
+
+    $args = @(
+        "translate",
+        $global:InputEpub,
+        "--cache-root", $global:CacheRoot,
+        "--keep-cache",
+        "--output", $global:OutputEpub
+    )
+    if ($PartialFromCache) {
+        $args += "--partial-from-cache"
+    }
+    if ($From -gt 0) {
+        $args += @("--from", "$From")
+    }
+    if ($To -gt 0) {
+        $args += @("--to", "$To")
+    }
+    $args += $ExtraArgs
+    return $args
+}
 
 function Show-EpubicusLocalCommands {
     Write-Host ""
     Write-Host "InputEpub  = $global:InputEpub"
     Write-Host "OutputEpub = $global:OutputEpub"
     Write-Host "CacheRoot  = $global:CacheRoot"
+    if ($ExtraArgs.Count -gt 0) {
+        Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
+    }
     Write-Host ""
     Write-Host "Local page-range check:"
     Write-Host "Invoke-EpubicusLocalPageCheck"
-    Write-Host "cargo run -- translate `$InputEpub --cache-root `$CacheRoot --from 3 --to 3 --keep-cache --output `$OutputEpub"
+    Write-Host "cargo run -- $((New-EpubicusLocalTranslateArgs -From $From -To $To) -join ' ')"
     Write-Host ""
     Write-Host "Local full conversion:"
     Write-Host "Invoke-EpubicusLocalFull"
-    Write-Host "cargo run -- translate `$InputEpub --cache-root `$CacheRoot --keep-cache --output `$OutputEpub"
+    Write-Host "cargo run -- $((New-EpubicusLocalTranslateArgs) -join ' ')"
     Write-Host ""
     Write-Host "Assemble from cache only:"
     Write-Host "Invoke-EpubicusAssembleFromCache"
-    Write-Host "cargo run -- translate `$InputEpub --cache-root `$CacheRoot --partial-from-cache --keep-cache --output `$OutputEpub"
+    Write-Host "cargo run -- $((New-EpubicusLocalTranslateArgs -PartialFromCache) -join ' ')"
     Write-Host ""
 }
 
@@ -90,27 +125,15 @@ function Invoke-EpubicusLocalPageCheck {
         [int]$To = 3
     )
 
-    cargo run -- translate $global:InputEpub `
-        --cache-root $global:CacheRoot `
-        --from $From `
-        --to $To `
-        --keep-cache `
-        --output $global:OutputEpub
+    cargo run -- @(New-EpubicusLocalTranslateArgs -From $From -To $To)
 }
 
 function Invoke-EpubicusLocalFull {
-    cargo run -- translate $global:InputEpub `
-        --cache-root $global:CacheRoot `
-        --keep-cache `
-        --output $global:OutputEpub
+    cargo run -- @(New-EpubicusLocalTranslateArgs)
 }
 
 function Invoke-EpubicusAssembleFromCache {
-    cargo run -- translate $global:InputEpub `
-        --cache-root $global:CacheRoot `
-        --partial-from-cache `
-        --keep-cache `
-        --output $global:OutputEpub
+    cargo run -- @(New-EpubicusLocalTranslateArgs -PartialFromCache)
 }
 
 Show-EpubicusLocalCommands

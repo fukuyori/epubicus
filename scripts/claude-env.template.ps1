@@ -10,6 +10,10 @@
 #   Page-range test:
 #     .\scripts\claude-env.ps1 .\test\sample.epub -From 3 -To 3
 #
+#   Pass additional epubicus translate options:
+#     .\scripts\claude-env.ps1 .\test\sample.epub -ExtraArgs @("--glossary", ".\glossary.json")
+#     .\scripts\claude-env.ps1 .\test\sample.epub --glossary .\glossary.json
+#
 #   Or load it without running:
 #     . .\scripts\claude-env.ps1 .\test\sample.epub -NoRun
 #     Invoke-EpubicusClaude
@@ -26,9 +30,14 @@ param(
 
     [int]$Concurrency = 1,
 
+    [string[]]$ExtraArgs = @(),
+
     [switch]$UsageOnly,
 
-    [switch]$NoRun
+    [switch]$NoRun,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$PassthroughArgs = @()
 )
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -44,6 +53,7 @@ $inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($global:InputEpub
 $inputExtension = [System.IO.Path]::GetExtension($global:InputEpub)
 $global:OutputEpub = Join-Path $inputDir "$inputBaseName`_jp$inputExtension"
 $global:CacheRoot = Join-Path $ProjectRoot ".claude-cache"
+$ExtraArgs = @($ExtraArgs) + @($PassthroughArgs)
 
 $env:EPUBICUS_PROVIDER = "claude"
 $env:EPUBICUS_MODEL = $Model
@@ -77,6 +87,7 @@ function New-EpubicusClaudeArgs {
     if ($UsageOnly) {
         $args += "--usage-only"
     }
+    $args += $ExtraArgs
     return $args
 }
 
@@ -86,6 +97,9 @@ function Show-EpubicusClaudeCommands {
     Write-Host "OutputEpub = $global:OutputEpub"
     Write-Host "CacheRoot  = $global:CacheRoot"
     Write-Host "Model      = $env:EPUBICUS_MODEL"
+    if ($ExtraArgs.Count -gt 0) {
+        Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
+    }
     Write-Host ""
     Write-Host "Normal Claude conversion:"
     Write-Host "Invoke-EpubicusClaude"

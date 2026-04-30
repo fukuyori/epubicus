@@ -1265,6 +1265,45 @@ fn batch_import_rejects_invalid_translation_without_caching() -> Result<()> {
 }
 
 #[test]
+fn batch_import_keeps_valid_cache_when_output_is_invalid() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    let key = work_items[0]["cache_key"]
+        .as_str()
+        .context("missing cache_key")?;
+    let mut cache = CacheStore::from_args(&input, &common_args(cache_root.clone()))?;
+    cache.insert(crate::cache::CacheRecord {
+        key: key.to_string(),
+        translated: "これは有効な日本語訳です。".to_string(),
+        provider: "openai".to_string(),
+        model: DEFAULT_OPENAI_MODEL.to_string(),
+        at: chrono::Utc::now().to_rfc3339(),
+    })?;
+    let output_path = dir.path().join("output.jsonl");
+    write_fixture_output(&output_path, &work_items[0..1], |source| source.to_string())?;
+
+    batch_import(BatchImportArgs {
+        input: input.clone(),
+        output: Some(output_path),
+        common: common_args(cache_root.clone()),
+    })?;
+
+    let updated = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(updated[0]["state"], "imported");
+    assert_eq!(updated[0]["last_error"], serde_json::Value::Null);
+    let rejected = read_jsonl_values(&batch_dir.join(REJECTED_FILE))?;
+    assert!(rejected.is_empty());
+    let report: ImportReport =
+        serde_json::from_slice(&fs::read(batch_dir.join(IMPORT_REPORT_FILE))?)?;
+    assert_eq!(report.already_cached_count, 1);
+    assert_eq!(report.rejected_count, 0);
+    Ok(())
+}
+
+#[test]
 fn batch_retry_requests_defaults_to_failed_and_rejected_items() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let input = dir.path().join("minimal.epub");

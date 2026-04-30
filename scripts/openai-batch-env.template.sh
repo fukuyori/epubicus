@@ -6,6 +6,7 @@
 #   chmod +x scripts/openai-batch-env.sh
 #   export OPENAI_API_KEY="..."
 #   scripts/openai-batch-env.sh ./book.epub
+#   scripts/openai-batch-env.sh ./book.epub -- --glossary ./glossary.json
 
 set -eu
 
@@ -28,6 +29,7 @@ while [ "$#" -gt 0 ]; do
         --poll-secs) POLL_SECS="$2"; shift 2 ;;
         --no-wait) NO_WAIT="1"; shift ;;
         --no-run) NO_RUN="1"; shift ;;
+        --) shift; break ;;
         -*) echo "unknown option: $1" >&2; return 2 2>/dev/null || exit 2 ;;
         *)
             if [ -z "$INPUT_PATH" ]; then INPUT_PATH="$1"; shift; else echo "unexpected argument: $1" >&2; return 2 2>/dev/null || exit 2; fi
@@ -60,7 +62,7 @@ if [ -z "${OPENAI_API_KEY:-}" ]; then
 fi
 
 invoke_epubicus_openai_batch() {
-    set -- run "$InputEpub" --provider openai --model "$EPUBICUS_MODEL" --cache-root "$CacheRoot" --force-prepare --poll-secs "$POLL_SECS" --output "$OutputEpub"
+    set -- run "$InputEpub" --provider openai --model "$EPUBICUS_MODEL" --cache-root "$CacheRoot" --force-prepare --poll-secs "$POLL_SECS" --output "$OutputEpub" "$@"
     if [ "$NO_WAIT" = "0" ]; then set -- "$@" --wait; fi
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
     if [ "$TO" -gt 0 ]; then set -- "$@" --to "$TO"; fi
@@ -80,11 +82,14 @@ echo "InputEpub  = $InputEpub"
 echo "OutputEpub = $OutputEpub"
 echo "CacheRoot  = $CacheRoot"
 echo "Model      = $EPUBICUS_MODEL"
+if [ "$#" -gt 0 ]; then
+    echo "ExtraArgs  = $*"
+fi
 echo
 echo "Batch conversion:"
 echo "invoke_epubicus_openai_batch"
 echo
 
 if [ "$NO_RUN" = "0" ]; then
-    invoke_epubicus_openai_batch
+    invoke_epubicus_openai_batch "$@"
 fi

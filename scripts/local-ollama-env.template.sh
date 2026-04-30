@@ -10,6 +10,7 @@
 #   scripts/local-ollama-env.sh ./book.epub --mode page --from 3 --to 3
 #   scripts/local-ollama-env.sh ./book.epub --mode cache
 #   . scripts/local-ollama-env.sh ./book.epub --no-run
+#   scripts/local-ollama-env.sh ./book.epub -- --glossary ./glossary.json
 
 set -eu
 
@@ -39,6 +40,10 @@ while [ "$#" -gt 0 ]; do
         --no-run)
             NO_RUN="1"
             shift
+            ;;
+        --)
+            shift
+            break
             ;;
         -*)
             echo "unknown option: $1" >&2
@@ -90,6 +95,9 @@ show_epubicus_local_commands() {
     echo "InputEpub  = $InputEpub"
     echo "OutputEpub = $OutputEpub"
     echo "CacheRoot  = $CacheRoot"
+    if [ "$#" -gt 0 ]; then
+        echo "ExtraArgs  = $*"
+    fi
     echo
     echo "Local page-range check:"
     echo "invoke_epubicus_local_page_check"
@@ -111,14 +119,16 @@ invoke_epubicus_local_page_check() {
         --from "$FROM" \
         --to "$TO" \
         --keep-cache \
-        --output "$OutputEpub"
+        --output "$OutputEpub" \
+        "$@"
 }
 
 invoke_epubicus_local_full() {
     cargo run -- translate "$InputEpub" \
         --cache-root "$CacheRoot" \
         --keep-cache \
-        --output "$OutputEpub"
+        --output "$OutputEpub" \
+        "$@"
 }
 
 invoke_epubicus_assemble_from_cache() {
@@ -126,16 +136,17 @@ invoke_epubicus_assemble_from_cache() {
         --cache-root "$CacheRoot" \
         --partial-from-cache \
         --keep-cache \
-        --output "$OutputEpub"
+        --output "$OutputEpub" \
+        "$@"
 }
 
-show_epubicus_local_commands
+show_epubicus_local_commands "$@"
 
 if [ "$NO_RUN" = "0" ]; then
     case "$MODE" in
-        page) invoke_epubicus_local_page_check ;;
-        cache) invoke_epubicus_assemble_from_cache ;;
-        full) invoke_epubicus_local_full ;;
+        page) invoke_epubicus_local_page_check "$@" ;;
+        cache) invoke_epubicus_assemble_from_cache "$@" ;;
+        full) invoke_epubicus_local_full "$@" ;;
         *)
             echo "unknown mode: $MODE" >&2
             return 2 2>/dev/null || exit 2
