@@ -31,7 +31,34 @@ cargo run -- translate .\book.epub -o .\book.ja.epub --provider ollama --model q
 cargo run -- translate .\book.epub -o .\book.ja.epub --provider ollama --model qwen3:14b --timeout-secs 1800 --retries 3
 ```
 
+OpenAI などのリモート provider では、未キャッシュのリクエストを並列実行すると全体の待ち時間を短縮できます。
+
+```powershell
+cargo run -- translate .\book.epub -o .\book.ja.epub --provider openai --model gpt-5-mini --concurrency 4
+```
+
+変換前に概算のAPIリクエスト数とトークン数だけを確認するには `--usage-only` を使います。provider は呼びません。
+
+```powershell
+cargo run -- translate .\book.epub -p openai -m gpt-5-mini -j 4 --usage-only
+```
+
+よく使う設定は PowerShell セッションで一度だけ `EPUBICUS_*` 環境変数に入れておくと、毎回長いオプションを書かずに済みます。
+
+```powershell
+$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
+$env:EPUBICUS_PROVIDER = "openai"
+$env:EPUBICUS_MODEL = "gpt-5-mini"
+$env:EPUBICUS_FALLBACK_PROVIDER = "ollama"
+$env:EPUBICUS_FALLBACK_MODEL = "qwen3:14b"
+$env:EPUBICUS_CONCURRENCY = "4"
+
+cargo run -- translate .\book.epub -o .\book.ja.epub
+```
+
 翻訳結果は OS 標準のキャッシュ root（Windows: `%LOCALAPPDATA%\epubicus\cache`、Unix: `~/.cache/epubicus`）配下に、入力 EPUB ごとに保存されます。サブディレクトリ名は入力 EPUB の SHA-256 ハッシュ先頭 16 バイト hex で、中に `manifest.json` と `translations.jsonl` が入ります。
+
+provider から返った内容はキャッシュに書く前に検証します。空応答、英語原文そのまま、プロンプト用タグの混入、インラインプレースホルダ欠落、拒否・説明文らしい応答は `--retries` に従って再試行します。拒否・説明文らしい応答で再試行が尽きた場合、`--fallback-provider` が指定されていれば同じ原文を fallback provider で翻訳し直します。fallback も失敗した場合は翻訳として保存せずエラーにします。
 
 ```powershell
 cargo run -- translate .\book.epub -o .\book.ja.epub --cache-root .\.epubicus-cache
@@ -40,7 +67,7 @@ cargo run -- translate .\book.epub -o .\book.ja.epub --no-cache
 cargo run -- translate .\book.epub -o .\book.ja.epub --keep-cache
 ```
 
-中断後は同じ `translate` コマンドを再実行すると、キャッシュ済みブロックを飛ばして続きから翻訳します。キャッシュは入力 EPUB のハッシュで識別されるため、出力先パスを変えても再開可能です。プログレスバーは開始時に `resuming: 991/5805 cached` のように既存キャッシュ分を反映した位置から始まります。
+中断後は同じ `translate` コマンドを再実行すると、キャッシュ済みブロックを飛ばして続きから翻訳します。キャッシュは入力 EPUB のハッシュで識別されるため、出力先パスを変えても再開可能です。並列実行中も、成功したブロックはページ全体の完了を待たずに即座にキャッシュへ書き込むため、中断時に失われるのは「その瞬間に処理中で、まだ結果が返っていないブロック」に限られます。プログレスバーは開始時に `resuming: 991/5805 cached` のように既存キャッシュ分を反映した位置から始まります。
 
 成功完了時にキャッシュは **自動削除** されます。デバッグ用途や部分再利用のため残したい場合は `--keep-cache` を指定します。
 
@@ -95,7 +122,7 @@ cargo run -- glossary  <INPUT.epub> [-o glossary.json]
 cargo run -- cache     <SUBCOMMAND>
 ```
 
-`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数に基づくプログレスバーを表示します。ETA は未キャッシュの実翻訳が 5 ブロック以上、かつ 30 秒以上進むまでは `ETA warming up` と表示します。
+`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数、未キャッシュブロックの provider リクエスト進捗をプログレスバーに表示します。ETA は未キャッシュの実翻訳が 5 ブロック以上、かつ 30 秒以上進むまでは `ETA warming up` と表示します。OpenAI / Claude など provider が usage を返す場合は、終了時に API リクエスト数と input / output / total tokens を表示します。
 
 `test` は指定 spine 範囲の翻訳結果を標準出力に表示します。EPUB は作成しません。
 
@@ -125,27 +152,42 @@ cargo run -- cache     <SUBCOMMAND>
 
 ### `translate` / `test` 共通
 
-| オプション | デフォルト | 説明 |
-|--|--|--|
-| `--provider ollama\|openai\|claude` | `ollama` | 翻訳 provider |
-| `-m, --model NAME` | provider ごと | モデル名 |
-| `--ollama-host URL` | `http://localhost:11434` | Ollama エンドポイント |
-| `--openai-base-url URL` | `https://api.openai.com/v1` | OpenAI API base URL |
-| `--claude-base-url URL` | `https://api.anthropic.com/v1` | Claude / Anthropic API base URL |
-| `--openai-api-key KEY` | なし | OpenAI API キー |
-| `--anthropic-api-key KEY` | なし | Anthropic API キー |
-| `--prompt-api-key` | false | 実行時に API キーを非表示入力 |
-| `--temperature F` | `0.3` | サンプリング温度 |
-| `--num-ctx N` | `8192` | Ollama に渡すコンテキスト長 |
-| `--timeout-secs N` | `900` | 1 リクエストあたりの HTTP タイムアウト秒数 |
-| `--retries N` | `2` | タイムアウト、接続失敗、rate limit、server error 時のリトライ回数 |
-| `--style STYLE` | `essay` | 文体プリセット。`novel`, `novel-polite`, `tech`, `essay`, `academic`, `business` |
-| `--dry-run` | false | provider を呼ばず、原文を使って EPUB 処理だけ確認 |
-| `--glossary PATH` | なし | 用語統一に使う glossary JSON |
-| `--cache-root PATH` | OS 標準（`%LOCALAPPDATA%\epubicus\cache` / `~/.cache/epubicus`） | キャッシュ root を上書き。入力 EPUB ごとに `<cache-root>/<input-hash>/` 以下に保存 |
-| `--no-cache` | false | キャッシュを読み書きしない。既存キャッシュは削除しない |
-| `--clear-cache` | false | この入力 EPUB のキャッシュを削除してから翻訳開始 |
-| `--keep-cache` | false | 成功完了後もキャッシュを保持（デフォルトは自動削除） |
+CLI 引数を指定した場合は、環境変数より CLI 引数が優先されます。
+
+| オプション | 環境変数 | デフォルト | 説明 |
+|--|--|--|--|
+| `-p, --provider ollama\|openai\|claude` | `EPUBICUS_PROVIDER` | `ollama` | 翻訳 provider |
+| `-m, --model NAME` | `EPUBICUS_MODEL` | provider ごと | モデル名 |
+| `--fallback-provider ollama\|openai\|claude` | `EPUBICUS_FALLBACK_PROVIDER` | なし | 主 provider が拒否・説明文らしい応答を返し、リトライが尽きた場合だけ使う fallback provider |
+| `--fallback-model NAME` | `EPUBICUS_FALLBACK_MODEL` | fallback provider ごと | fallback provider のモデル名 |
+| `--ollama-host URL` | `EPUBICUS_OLLAMA_HOST` | `http://localhost:11434` | Ollama エンドポイント |
+| `--openai-base-url URL` | `EPUBICUS_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL |
+| `--claude-base-url URL` | `EPUBICUS_CLAUDE_BASE_URL` | `https://api.anthropic.com/v1` | Claude / Anthropic API base URL |
+| `--openai-api-key KEY` | `OPENAI_API_KEY` | なし | OpenAI API キー。`--openai-api-key` が優先 |
+| `--anthropic-api-key KEY` | `ANTHROPIC_API_KEY` | なし | Anthropic API キー。`--anthropic-api-key` が優先 |
+| `--prompt-api-key` | なし | false | 実行時に API キーを非表示入力 |
+| `-T, --temperature F` | `EPUBICUS_TEMPERATURE` | `0.3` | サンプリング温度 |
+| `-n, --num-ctx N` | `EPUBICUS_NUM_CTX` | `8192` | Ollama に渡すコンテキスト長 |
+| `-t, --timeout-secs N` | `EPUBICUS_TIMEOUT_SECS` | `900` | 1 リクエストあたりの HTTP タイムアウト秒数 |
+| `-r, --retries N` | `EPUBICUS_RETRIES` | `3` | 初回試行後のリトライ回数。タイムアウト、接続失敗、rate limit、server error、検証失敗時に使う |
+| `-x, --max-chars-per-request N` | `EPUBICUS_MAX_CHARS_PER_REQUEST` | `3500` | これより長い XHTML テキストブロックを文境界で複数リクエストに分割。`0` で分割を無効化 |
+| `-j, --concurrency N` | `EPUBICUS_CONCURRENCY` | `1` | XHTML ファイル単位で、未キャッシュの provider リクエストを最大 N 件並列実行。rate limit、timeout、server error などの再試行対象エラーが出た場合は実効並列数を自動的に下げ、成功リクエストが続いたら指定上限まで少しずつ戻す |
+| `-s, --style STYLE` | `EPUBICUS_STYLE` | `essay` | 文体プリセット。`novel`, `novel-polite`, `tech`, `essay`, `academic`, `business` |
+| `-d, --dry-run` | なし | false | provider を呼ばず、原文を使って EPUB 処理だけ確認 |
+| `-g, --glossary PATH` | なし | なし | 用語統一に使う glossary JSON |
+| `--cache-root PATH` | なし | OS 標準（`%LOCALAPPDATA%\epubicus\cache` / `~/.cache/epubicus`） | キャッシュ root を上書き。入力 EPUB ごとに `<cache-root>/<input-hash>/` 以下に保存 |
+| `--no-cache` | なし | false | キャッシュを読み書きしない。既存キャッシュは削除しない |
+| `--clear-cache` | なし | false | この入力 EPUB のキャッシュを削除してから翻訳開始 |
+| `-k, --keep-cache` | なし | false | 成功完了後もキャッシュを保持（デフォルトは自動削除） |
+| `-u, --usage-only` | なし | false | provider を呼ばず、対象ページのAPIリクエスト数と概算トークン数だけを表示 |
+
+provider ごとの `--model` デフォルト:
+
+| provider | デフォルトモデル |
+|--|--|
+| `ollama` | `qwen3:14b` |
+| `openai` | `gpt-5-mini` |
+| `claude` | `claude-sonnet-4-5` |
 
 ### `glossary`
 
@@ -175,6 +217,10 @@ cargo run -- cache     <SUBCOMMAND>
 ## Provider
 
 Ollama はデフォルト provider で、ローカルで動作します。
+
+OpenAI Batch API を使った将来の非同期翻訳モードについては
+[docs/batch-api-design.md](docs/batch-api-design.md) に設計を、
+[docs/batch-api-implementation-plan.md](docs/batch-api-implementation-plan.md) に実装計画をまとめています。
 
 ```powershell
 cargo run -- test .\book.epub --from 1 --to 1 --provider ollama --model qwen3:14b

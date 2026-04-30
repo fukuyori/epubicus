@@ -1,0 +1,291 @@
+# Batch API implementation plan
+
+Last updated: 2026-04-30
+
+This plan turns `docs/batch-api-design.md` into implementation phases. The
+order is chosen to keep the cache safe first, then add local-only batch artifact
+handling, then add network operations.
+
+## Phase 0: Groundwork and invariants
+
+Goal: make the current cache path safe enough for batch and multi-process use.
+
+Tasks:
+
+- Add cache and batch lock primitives.
+- Define lock order: batch lock first, cache lock second.
+- Protect `translations.jsonl`, `manifest.json`, and cache deletion with the
+  cache lock.
+- Add duplicate cache-key handling:
+  - identical translated text: accept as already done
+  - conflicting translated text: reject and report
+- Add atomic JSON state writer for manifest-like files.
+- Add tests for lock acquisition, duplicate cache insert, and atomic write.
+
+Verification:
+
+- `cargo test`
+- A test with two writers cannot corrupt `translations.jsonl`.
+- Cache deletion refuses or waits while another process holds the cache lock.
+
+Exit criteria:
+
+- Existing `translate` behavior still works.
+- Cache writes are serialized across processes.
+
+## Phase 1: Work item ledger and prepare
+
+Goal: create a local batch workspace without calling OpenAI.
+
+Tasks:
+
+- Add `batch` subcommand group.
+- Implement `batch prepare`.
+- Create batch workspace:
+  - `batch/batch_manifest.json`
+  - `batch/work_items.jsonl`
+  - `batch/requests.jsonl`
+- Define structs:
+  - `BatchManifest`
+  - `WorkItem`
+  - `WorkState`
+  - `BatchRequestLine`
+- Generate stable `custom_id`:
+  - input hash
+  - page index
+  - block index
+  - cache key
+- Store `source_hash` and `prompt_hash`.
+- Skip valid cache hits.
+- Support selected page ranges if practical; otherwise document full-book only
+  for the first slice.
+
+Verification:
+
+- Unit tests for `custom_id` generation and parsing.
+- Golden JSONL fixture for `requests.jsonl`.
+- `batch prepare` on the minimal EPUB produces deterministic output.
+
+Exit criteria:
+
+- Running `batch prepare` repeatedly is idempotent.
+- No network calls are made.
+- Prepared request count matches uncached block count.
+
+## Phase 2: Local import from fixtures
+
+Goal: validate the output-to-cache path before adding network calls.
+
+Tasks:
+
+- Implement `batch import --output <PATH>` for local fixture output.
+- Parse output JSONL by `custom_id`, never by line order.
+- Extract text from `/v1/responses` shaped output.
+- Validate translated text with existing validation.
+- Write valid translations to cache immediately.
+- Update `work_items.jsonl` states:
+  - `completed`
+  - `imported`
+  - `rejected`
+  - `failed`
+- Write:
+  - `rejected.jsonl`
+  - `errors.jsonl`
+  - `import_report.json`
+- Add stale checks using `source_hash` and `prompt_hash`.
+
+Verification:
+
+- Fixture import fills cache.
+- Invalid translation is quarantined, not cached.
+- Duplicate output lines are handled deterministically.
+- Reordered output lines import correctly.
+- `translate --partial-from-cache` can assemble from imported cache.
+
+Exit criteria:
+
+- A complete fake batch cycle works offline:
+  `prepare -> fixture output -> import -> partial assemble`.
+
+## Phase 3: Health and verify
+
+Goal: make processing status visible and repairable before remote submission.
+
+Tasks:
+
+- Implement `batch health`.
+- Implement `batch verify`.
+- `batch health` reports:
+  - state counts
+  - remaining count
+  - last updated timestamp
+  - cache count
+  - stale item count
+- `batch verify` compares:
+  - current EPUB extraction
+  - `work_items.jsonl`
+  - `translations.jsonl`
+- Report:
+  - `missing`
+  - `stale`
+  - `orphaned`
+  - `cache_conflict`
+  - `invalid_cache`
+- Keep verify read-only by default.
+- Defer `--repair` until the read-only report is trusted.
+
+Verification:
+
+- Tests with manipulated ledger/cache fixtures.
+- Verify detects stale prompt/source hashes.
+- Health output remains stable enough for users to compare runs.
+
+Exit criteria:
+
+- The user can inspect exactly what is done, pending, failed, rejected, and
+  stale without opening JSONL files.
+
+## Phase 4: Submit, status, and fetch
+
+Goal: add the OpenAI Batch API network path.
+
+Tasks:
+
+- Implement `batch submit`.
+- Upload `requests.jsonl` with `purpose=batch`.
+- Create batch with:
+  - endpoint `/v1/responses`
+  - `completion_window: "24h"`
+- Persist:
+  - `file_id`
+  - `batch_id`
+  - remote status
+- Implement `batch status`.
+- Implement `batch fetch`.
+- Download:
+  - `output_file_id` -> `output.jsonl`
+  - `error_file_id` -> `errors.jsonl`
+- Make submit/status/fetch safe to rerun.
+- Reuse existing OpenAI API key handling.
+
+Verification:
+
+- Small real batch smoke test.
+- Re-running status updates manifest without corrupting local state.
+- Fetch refuses to overwrite existing output unless `--force` is set.
+
+Exit criteria:
+
+- A small EPUB can run:
+  `prepare -> submit -> status -> fetch -> import -> translate`.
+
+## Phase 5: Retry and local rerouting
+
+Goal: let the user recover unfinished work without manual JSONL editing.
+
+Tasks:
+
+- Implement `batch reroute-local`.
+- Implement `batch translate-local`.
+- Selection modes:
+  - `--state failed`
+  - `--state rejected`
+  - `--remaining`
+  - `--endgame-threshold N`
+- Mark selected items as `local_pending`.
+- Translate `local_pending` through existing backend, usually Ollama.
+- Write successful local results to cache immediately.
+- Mark successful local results as `local_imported`.
+- Preserve provider/model in cache records.
+
+Verification:
+
+- Failed/rejected fixtures can be rerouted and imported locally.
+- `--remaining` excludes already imported/cached/skipped items.
+- Local translation failures keep state and `last_error`.
+
+Exit criteria:
+
+- The user can switch remaining batch work to local translation safely.
+
+## Phase 6: Priority scheduling and endgame
+
+Goal: improve speed and reduce tail latency.
+
+Tasks:
+
+- Add priority selection for reroute/retry:
+  - `page-order`
+  - `failed-first`
+  - `hard-first`
+  - `short-first`
+  - `oldest-first`
+- Define complexity score:
+  - source chars
+  - placeholder count
+  - previous failure count
+- Add explicit endgame flow:
+  - show selected remaining count
+  - reroute to local or synchronous provider
+  - do not make it automatic unless a flag asks for it
+
+Verification:
+
+- Priority ordering unit tests.
+- Endgame selection excludes imported/cached items.
+- User-facing summaries show why items were selected.
+
+Exit criteria:
+
+- Last few unfinished items can be completed without waiting for another remote
+  batch cycle.
+
+## Phase 7: Large-job hardening
+
+Goal: make batch mode safe for large EPUBs and repeated interruptions.
+
+Tasks:
+
+- Split request JSONL before API size/request limits.
+- Support multiple batch parts:
+  - `batch_part_0001`
+  - `batch_part_0002`
+- Track per-part remote IDs and statuses.
+- Add recovery tests for interrupted:
+  - prepare
+  - submit
+  - fetch
+  - import
+  - reroute-local
+- Add stress tests for concurrent:
+  - `translate`
+  - `batch import`
+  - `batch status`
+  - `batch verify`
+
+Verification:
+
+- Multi-part fixture imports correctly.
+- Concurrent commands cannot corrupt cache or ledger.
+- Interrupted import can be re-run safely.
+
+Exit criteria:
+
+- Batch mode is robust enough for large books and repeated restarts.
+
+## Recommended implementation order
+
+1. Phase 0 lock/cache safety.
+2. Phase 1 prepare.
+3. Phase 2 fixture import.
+4. Phase 3 health/verify.
+5. Phase 4 submit/status/fetch.
+6. Phase 5 local rerouting.
+7. Phase 6 priority/endgame.
+8. Phase 7 large-job hardening.
+
+The first useful milestone is the end of Phase 2: even without OpenAI network
+calls, epubicus can produce batch requests and import fixture results into the
+cache. That proves the split/import/assemble model before remote complexity is
+added.
+

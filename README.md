@@ -31,7 +31,34 @@ For long local-model generations, increase the per-request timeout and retry cou
 cargo run -- translate .\book.epub -o .\book.ja.epub --provider ollama --model qwen3:14b --timeout-secs 1800 --retries 3
 ```
 
+For remote providers, run several uncached requests in parallel to improve throughput:
+
+```powershell
+cargo run -- translate .\book.epub -o .\book.ja.epub --provider openai --model gpt-5-mini --concurrency 4
+```
+
+To preview the estimated API request and token usage before translating, use `--usage-only`. It does not call the provider.
+
+```powershell
+cargo run -- translate .\book.epub -p openai -m gpt-5-mini -j 4 --usage-only
+```
+
+To avoid repeating common options, set `EPUBICUS_*` environment variables once in your PowerShell session:
+
+```powershell
+$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
+$env:EPUBICUS_PROVIDER = "openai"
+$env:EPUBICUS_MODEL = "gpt-5-mini"
+$env:EPUBICUS_FALLBACK_PROVIDER = "ollama"
+$env:EPUBICUS_FALLBACK_MODEL = "qwen3:14b"
+$env:EPUBICUS_CONCURRENCY = "4"
+
+cargo run -- translate .\book.epub -o .\book.ja.epub
+```
+
 Translation results are cached per-input EPUB under an OS-standard cache root (Windows: `%LOCALAPPDATA%\epubicus\cache`, Unix: `~/.cache/epubicus`). Each input gets its own subdirectory named after the SHA-256 hash of its bytes, with `manifest.json` and `translations.jsonl` inside.
+
+Provider responses are validated before they are written to the cache. Empty responses, unchanged English source text, prompt-wrapper leaks, missing inline placeholders, and likely refusal/explanation text are retried according to `--retries`. If a likely refusal/explanation still fails after retries and `--fallback-provider` is set, the original source text is translated again with the fallback provider. If the fallback also fails, the run stops without caching the bad response.
 
 ```powershell
 cargo run -- translate .\book.epub -o .\book.ja.epub --cache-root .\.epubicus-cache
@@ -40,7 +67,7 @@ cargo run -- translate .\book.epub -o .\book.ja.epub --no-cache
 cargo run -- translate .\book.epub -o .\book.ja.epub --keep-cache
 ```
 
-After an interrupted run, rerun the same `translate` command to resume from uncached blocks. Because the cache directory is keyed by input EPUB hash, resuming works regardless of the output path. The progress bar starts at the cached position and shows a message such as `resuming: 991/5805 cached`.
+After an interrupted run, rerun the same `translate` command to resume from uncached blocks. Because the cache directory is keyed by input EPUB hash, resuming works regardless of the output path. During parallel execution, each successful block is written to the cache immediately instead of waiting for the whole page batch to finish, so an interruption only loses blocks that were still in flight and had not returned yet. The progress bar starts at the cached position and shows a message such as `resuming: 991/5805 cached`.
 
 On a successful full-range translation, the cache directory is **automatically deleted**. Pass `--keep-cache` to retain it (useful for debugging or to keep entries available for partial reuse).
 
@@ -95,7 +122,7 @@ cargo run -- glossary  <INPUT.epub> [-o glossary.json]
 cargo run -- cache     <SUBCOMMAND>
 ```
 
-`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, and translatable XHTML block count. ETA stays as `ETA warming up` until at least 5 uncached model-translated blocks and 30 seconds have been observed.
+`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA stays as `ETA warming up` until at least 5 uncached model-translated blocks and 30 seconds have been observed. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
 
 `test` prints translated text for a selected spine range to stdout. It does not create an EPUB.
 
@@ -125,27 +152,42 @@ cargo run -- cache     <SUBCOMMAND>
 
 ### Shared `translate` / `test` Options
 
-| Option | Default | Description |
-|--|--|--|
-| `--provider ollama\|openai\|claude` | `ollama` | Translation provider |
-| `-m, --model NAME` | provider-specific | Model name |
-| `--ollama-host URL` | `http://localhost:11434` | Ollama endpoint |
-| `--openai-base-url URL` | `https://api.openai.com/v1` | OpenAI API base URL |
-| `--claude-base-url URL` | `https://api.anthropic.com/v1` | Claude / Anthropic API base URL |
-| `--openai-api-key KEY` | none | OpenAI API key |
-| `--anthropic-api-key KEY` | none | Anthropic API key |
-| `--prompt-api-key` | false | Prompt for the provider API key without echoing it |
-| `--temperature F` | `0.3` | Sampling temperature |
-| `--num-ctx N` | `8192` | Context window size passed to Ollama |
-| `--timeout-secs N` | `900` | HTTP timeout per request, in seconds |
-| `--retries N` | `2` | Retries for timeouts, connection errors, rate limits, and server errors |
-| `--style STYLE` | `essay` | Style preset: `novel`, `novel-polite`, `tech`, `essay`, `academic`, `business` |
-| `--dry-run` | false | Do not call a provider; use source text to smoke-test EPUB handling |
-| `--glossary PATH` | none | Glossary JSON for consistent terms |
-| `--cache-root PATH` | OS cache (`%LOCALAPPDATA%\epubicus\cache` / `~/.cache/epubicus`) | Override the cache root. Per-EPUB caches live under `<cache-root>/<input-hash>/` |
-| `--no-cache` | false | Do not read or write the cache. Existing cache files are not deleted |
-| `--clear-cache` | false | Delete this input EPUB's cache before translating |
-| `--keep-cache` | false | Keep the cache after a successful completion (default: cache is auto-deleted) |
+CLI arguments take precedence over environment variables.
+
+| Option | Environment variable | Default | Description |
+|--|--|--|--|
+| `-p, --provider ollama\|openai\|claude` | `EPUBICUS_PROVIDER` | `ollama` | Translation provider |
+| `-m, --model NAME` | `EPUBICUS_MODEL` | provider-specific | Model name |
+| `--fallback-provider ollama\|openai\|claude` | `EPUBICUS_FALLBACK_PROVIDER` | none | Fallback provider used only when the primary provider returns a likely refusal/explanation and retries are exhausted |
+| `--fallback-model NAME` | `EPUBICUS_FALLBACK_MODEL` | fallback-provider-specific | Model name for the fallback provider |
+| `--ollama-host URL` | `EPUBICUS_OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
+| `--openai-base-url URL` | `EPUBICUS_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL |
+| `--claude-base-url URL` | `EPUBICUS_CLAUDE_BASE_URL` | `https://api.anthropic.com/v1` | Claude / Anthropic API base URL |
+| `--openai-api-key KEY` | `OPENAI_API_KEY` | none | OpenAI API key. `--openai-api-key` takes precedence |
+| `--anthropic-api-key KEY` | `ANTHROPIC_API_KEY` | none | Anthropic API key. `--anthropic-api-key` takes precedence |
+| `--prompt-api-key` | none | false | Prompt for the provider API key without echoing it |
+| `-T, --temperature F` | `EPUBICUS_TEMPERATURE` | `0.3` | Sampling temperature |
+| `-n, --num-ctx N` | `EPUBICUS_NUM_CTX` | `8192` | Context window size passed to Ollama |
+| `-t, --timeout-secs N` | `EPUBICUS_TIMEOUT_SECS` | `900` | HTTP timeout per request, in seconds |
+| `-r, --retries N` | `EPUBICUS_RETRIES` | `3` | Retries after the initial attempt for timeouts, connection errors, rate limits, server errors, and validation failures |
+| `-x, --max-chars-per-request N` | `EPUBICUS_MAX_CHARS_PER_REQUEST` | `3500` | Split longer XHTML text blocks into multiple provider requests at sentence boundaries. Use `0` to disable splitting |
+| `-j, --concurrency N` | `EPUBICUS_CONCURRENCY` | `1` | Run up to N uncached provider requests in parallel per XHTML file. The effective concurrency is automatically reduced after retryable errors such as rate limits, timeouts, and server errors, then slowly restored after successful requests |
+| `-s, --style STYLE` | `EPUBICUS_STYLE` | `essay` | Style preset: `novel`, `novel-polite`, `tech`, `essay`, `academic`, `business` |
+| `-d, --dry-run` | none | false | Do not call a provider; use source text to smoke-test EPUB handling |
+| `-g, --glossary PATH` | none | none | Glossary JSON for consistent terms |
+| `--cache-root PATH` | none | OS cache (`%LOCALAPPDATA%\epubicus\cache` / `~/.cache/epubicus`) | Override the cache root. Per-EPUB caches live under `<cache-root>/<input-hash>/` |
+| `--no-cache` | none | false | Do not read or write the cache. Existing cache files are not deleted |
+| `--clear-cache` | none | false | Delete this input EPUB's cache before translating |
+| `-k, --keep-cache` | none | false | Keep the cache after a successful completion (default: cache is auto-deleted) |
+| `-u, --usage-only` | none | false | Do not call a provider; only print estimated API requests and tokens for the selected pages |
+
+Provider-specific `--model` defaults:
+
+| Provider | Default model |
+|--|--|
+| `ollama` | `qwen3:14b` |
+| `openai` | `gpt-5-mini` |
+| `claude` | `claude-sonnet-4-5` |
 
 ### `glossary`
 
@@ -175,6 +217,11 @@ cargo run -- cache     <SUBCOMMAND>
 ## Providers
 
 Ollama is the default provider and runs locally:
+
+The future asynchronous OpenAI Batch API workflow is designed in
+[docs/batch-api-design.md](docs/batch-api-design.md), with the implementation
+plan in
+[docs/batch-api-implementation-plan.md](docs/batch-api-implementation-plan.md).
 
 ```powershell
 cargo run -- test .\book.epub --from 1 --to 1 --provider ollama --model qwen3:14b

@@ -532,6 +532,7 @@ epubicus cache clear --all [--yes] [--dry-run]        # 全削除（要確認）
 | `--review-glossary` | false | 用語集を対話レビュー |
 | `--temperature F` | 0.3 | サンプリング温度 |
 | `--num-ctx N` | 8192 | コンテキスト長 |
+| `--concurrency N` | 1 | XHTML ファイル単位で未キャッシュ provider リクエストを最大 N 件並列実行 |
 | `--style ID` | `essay`（v0.1）／`auto`（v0.3 以降） | 文体プリセット（§5.4）。`novel` / `novel-polite` / `tech` / `essay` / `academic` / `business` / `custom` / `auto` |
 | `--skip-chapters RANGES` | なし | `1,3,5-7` 形式で章スキップ |
 | `--only-chapters RANGES` | なし | 指定章のみ翻訳（デバッグ用） |
@@ -544,6 +545,8 @@ epubicus cache clear --all [--yes] [--dry-run]        # 全削除（要確認）
 | `--dry-run` | false | LLM を呼ばず統計のみ表示 |
 | `-v, --verbose` | false | 詳細ログ |
 | `-c, --config PATH` | `./epubicus.toml` 等 | 設定ファイル |
+
+実装済み CLI では、主要な共通オプションを `EPUBICUS_PROVIDER` / `EPUBICUS_MODEL` / `EPUBICUS_CONCURRENCY` などの環境変数からも読める。CLI 引数を指定した場合は CLI 引数を優先する。
 
 ### 8.1.1 cache サブコマンド
 

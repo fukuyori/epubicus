@@ -1,6 +1,6 @@
 [package]
 name = "epubicus"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["fukuyori <self@spumoni.org>"]
 description = "Translate English EPUB files to Japanese with local Ollama (or OpenAI / Claude), preserving inline formatting"
@@ -11,7 +11,7 @@ readme = "README.md"
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.18"
 quick-xml = "0.38"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

@@ -1,285 +1,66 @@
+#[cfg(test)]
+use std::fs::File;
 use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, BufWriter, Cursor, Write},
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
-use indicatif::{ProgressBar, ProgressStyle};
+use clap::Parser;
+#[cfg(test)]
+use quick_xml::name::QName;
 use quick_xml::{
     Reader, Writer,
     events::{BytesEnd, BytesStart, BytesText, Event},
-    name::QName,
 };
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
-use walkdir::WalkDir;
+#[cfg(test)]
+#[cfg(test)]
 use zip::{
-    CompressionMethod, ZipArchive, ZipWriter,
+    CompressionMethod, ZipWriter,
     write::{FileOptions, SimpleFileOptions},
 };
 
-const DEFAULT_MODEL: &str = "qwen3:14b";
-const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
-const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5";
-const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_CLAUDE_BASE_URL: &str = "https://api.anthropic.com/v1";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-const ETA_MIN_MODEL_BLOCKS: usize = 5;
-const ETA_MIN_ELAPSED_SECS: u64 = 30;
+mod cache;
+mod config;
+mod epub;
+mod glossary;
+mod progress;
+mod prompt;
+mod usage;
 
-#[derive(Parser)]
-#[command(name = "epubicus")]
-#[command(about = "Translate English EPUB files to Japanese with Ollama, OpenAI, or Claude")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+#[cfg(test)]
+use cache::compute_input_hash;
+use cache::{CacheRecord, CacheStore, ManifestParams, cache_command, glossary_sha};
+use config::*;
+#[cfg(test)]
+use epub::local_name;
+use epub::{
+    EpubBook, count_xhtml_blocks, find_nav_item, find_ncx_item, is_block_tag, pack_epub,
+    print_toc_entries, read_nav_toc, read_ncx_toc, unpack_epub, update_opf_metadata,
+};
+use glossary::{GlossaryEntry, glossary_command, load_glossary};
+use progress::ProgressReporter;
+use prompt::{retry_user_prompt, system_prompt, user_prompt};
+#[cfg(test)]
+use usage::ClaudeUsage;
+use usage::{
+    ApiUsage, ClaudeResponse, OllamaResponse, usage_from_claude_response,
+    usage_from_ollama_response, usage_from_openai_value,
+};
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Create a translated EPUB.
-    Translate(TranslateArgs),
-    /// Translate a spine page range and print the translation to stdout.
-    Test(TestArgs),
-    /// Inspect EPUB spine order.
-    Inspect(InspectArgs),
-    /// Show EPUB table of contents.
-    Toc(TocArgs),
-    /// Extract glossary candidates from an EPUB.
-    Glossary(GlossaryArgs),
-    /// Inspect or maintain translation caches.
-    Cache(CacheArgs),
-}
-
-#[derive(Parser, Clone)]
-struct CommonArgs {
-    /// Translation provider.
-    #[arg(long, value_enum, default_value_t = Provider::Ollama)]
-    provider: Provider,
-    /// Model name. Defaults depend on --provider.
-    #[arg(short, long)]
-    model: Option<String>,
-    /// Ollama endpoint.
-    #[arg(long, default_value = DEFAULT_OLLAMA_HOST)]
-    ollama_host: String,
-    /// OpenAI API base URL.
-    #[arg(long, default_value = DEFAULT_OPENAI_BASE_URL)]
-    openai_base_url: String,
-    /// Claude/Anthropic API base URL.
-    #[arg(long, default_value = DEFAULT_CLAUDE_BASE_URL)]
-    claude_base_url: String,
-    /// OpenAI API key. Prefer OPENAI_API_KEY or --prompt-api-key for interactive use.
-    #[arg(long)]
-    openai_api_key: Option<String>,
-    /// Anthropic API key. Prefer ANTHROPIC_API_KEY or --prompt-api-key for interactive use.
-    #[arg(long)]
-    anthropic_api_key: Option<String>,
-    /// Prompt for the provider API key at runtime without echoing it.
-    #[arg(long)]
-    prompt_api_key: bool,
-    /// Sampling temperature.
-    #[arg(long, default_value_t = 0.3)]
-    temperature: f32,
-    /// Context window size passed to Ollama.
-    #[arg(long, default_value_t = 8192)]
-    num_ctx: u32,
-    /// HTTP timeout per translation request, in seconds.
-    #[arg(long, default_value_t = 900)]
-    timeout_secs: u64,
-    /// Number of retries for timeout, connection, rate limit, or server errors.
-    #[arg(long, default_value_t = 2)]
-    retries: u32,
-    /// Style preset: novel, novel-polite, tech, essay, academic, business.
-    #[arg(long, default_value = "essay")]
-    style: String,
-    /// Do not call the translation provider; emit source text instead.
-    #[arg(long)]
-    dry_run: bool,
-    /// Glossary JSON file used to force consistent terms.
-    #[arg(long)]
-    glossary: Option<PathBuf>,
-    /// Override the cache root directory. Per-EPUB caches are stored under <cache_root>/<input_hash>/.
-    /// Defaults to OS-standard cache (Windows: %LOCALAPPDATA%\epubicus\cache, Unix: ~/.cache/epubicus).
-    #[arg(long)]
-    cache_root: Option<PathBuf>,
-    /// Disable translation cache.
-    #[arg(long)]
-    no_cache: bool,
-    /// Clear this input EPUB's cache before translating.
-    #[arg(long)]
-    clear_cache: bool,
-    /// Keep the cache after a successful completion (default: cache is auto-deleted on completion).
-    #[arg(long)]
-    keep_cache: bool,
-    /// Create a partial EPUB from cached translations and keep cache misses unchanged.
-    #[arg(long = "partial-from-cache")]
-    partial_from_cache: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Provider {
-    Ollama,
-    Openai,
-    Claude,
-}
-
-impl std::fmt::Display for Provider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Provider::Ollama => write!(f, "ollama"),
-            Provider::Openai => write!(f, "openai"),
-            Provider::Claude => write!(f, "claude"),
-        }
-    }
-}
-
-#[derive(Parser)]
-struct TranslateArgs {
-    /// Input EPUB.
-    input: PathBuf,
-    /// Output EPUB.
-    #[arg(short, long)]
-    output: Option<PathBuf>,
-    /// First spine page to translate, 1-based.
-    #[arg(long)]
-    from: Option<usize>,
-    /// Last spine page to translate, 1-based and inclusive.
-    #[arg(long)]
-    to: Option<usize>,
-    #[command(flatten)]
-    common: CommonArgs,
-}
-
-#[derive(Parser)]
-struct TestArgs {
-    /// Input EPUB.
-    input: PathBuf,
-    /// First spine page to translate, 1-based.
-    #[arg(long)]
-    from: usize,
-    /// Last spine page to translate, 1-based and inclusive.
-    #[arg(long)]
-    to: usize,
-    #[command(flatten)]
-    common: CommonArgs,
-}
-
-#[derive(Parser)]
-struct InspectArgs {
-    /// Input EPUB.
-    input: PathBuf,
-}
-
-#[derive(Parser)]
-struct TocArgs {
-    /// Input EPUB.
-    input: PathBuf,
-}
-
-#[derive(Parser)]
-struct GlossaryArgs {
-    /// Input EPUB.
-    input: PathBuf,
-    /// Output glossary JSON.
-    #[arg(short, long, default_value = "glossary.json")]
-    output: PathBuf,
-    /// Minimum occurrences required for a candidate.
-    #[arg(long, default_value_t = 3)]
-    min_occurrences: usize,
-    /// Maximum number of entries to output.
-    #[arg(long, default_value_t = 200)]
-    max_entries: usize,
-    /// Write a Markdown prompt for reviewing the glossary with ChatGPT or Claude.
-    #[arg(long)]
-    review_prompt: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-struct CacheArgs {
-    /// Override the cache root directory. Defaults to OS-standard cache location.
-    #[arg(long, global = true)]
-    cache_root: Option<PathBuf>,
-    #[command(subcommand)]
-    command: CacheCommand,
-}
-
-#[derive(Subcommand)]
-enum CacheCommand {
-    /// List all cached runs.
-    List,
-    /// Show details for a specific run (by hash prefix or input EPUB path).
-    Show {
-        /// Cache hash (full or prefix) or path to an input EPUB.
-        target: String,
-    },
-    /// Delete cache directories that have not been updated for the given number of days.
-    Prune {
-        /// Delete entries with last_updated_at older than N days.
-        #[arg(long)]
-        older_than: u64,
-        /// Skip the confirmation prompt.
-        #[arg(long, short = 'y')]
-        yes: bool,
-        /// Show what would be deleted without deleting.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Delete a single cached run, or all of them.
-    Clear {
-        /// Cache hash (full or prefix). Mutually exclusive with --all.
-        #[arg(long, conflicts_with = "all")]
-        hash: Option<String>,
-        /// Delete every cached run. Requires confirmation unless --yes is set.
-        #[arg(long, conflicts_with = "hash")]
-        all: bool,
-        /// Skip the confirmation prompt for --all.
-        #[arg(long, short = 'y')]
-        yes: bool,
-        /// Show what would be deleted without deleting.
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Debug)]
-struct EpubBook {
-    work_dir: TempDir,
-    opf_path: PathBuf,
-    manifest: Vec<ManifestItem>,
-    spine: Vec<SpineItem>,
-}
-
-#[derive(Debug, Clone)]
-struct ManifestItem {
-    id: String,
-    href: String,
-    abs_path: PathBuf,
-    media_type: String,
-    properties: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct SpineItem {
-    idref: String,
-    href: String,
-    abs_path: PathBuf,
-    media_type: String,
-    linear: bool,
-}
-
-#[derive(Debug)]
-struct SpineRef {
-    idref: String,
-    linear: bool,
-}
+const ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -306,360 +87,6 @@ struct InlineMap {
     entries: HashMap<u32, InlineEntry>,
 }
 
-#[derive(Debug, Deserialize)]
-struct OllamaResponse {
-    message: OllamaMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct OllamaMessage {
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeResponse {
-    content: Vec<ClaudeContent>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeContent {
-    #[serde(rename = "type")]
-    kind: String,
-    text: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct GlossaryFile {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source_lang: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    target_lang: Option<String>,
-    entries: Vec<GlossaryEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct GlossaryEntry {
-    src: String,
-    dst: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<String>,
-}
-
-#[derive(Debug)]
-struct GlossaryCandidate {
-    term: String,
-    count: usize,
-    kind: String,
-}
-
-const CACHE_SCHEMA_VERSION: u32 = 1;
-const MANIFEST_FILE: &str = "manifest.json";
-const TRANSLATIONS_FILE: &str = "translations.jsonl";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CacheRecord {
-    key: String,
-    translated: String,
-    provider: String,
-    model: String,
-    at: String,
-}
-
-#[derive(Debug, Default)]
-struct CacheStats {
-    hits: usize,
-    misses: usize,
-    writes: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Manifest {
-    schema_version: u32,
-    input: ManifestInput,
-    params: ManifestParams,
-    timestamps: ManifestTimestamps,
-    #[serde(default)]
-    last_output_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ManifestInput {
-    sha256: String,
-    path_when_started: String,
-    size_bytes: u64,
-    mtime: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ManifestParams {
-    provider: String,
-    model: String,
-    prompt_version: String,
-    style_id: String,
-    glossary_sha: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ManifestTimestamps {
-    started_at: String,
-    last_updated_at: String,
-}
-
-struct CacheStore {
-    enabled: bool,
-    /// Per-EPUB cache directory: <cache_root>/<input_hash>/. Always populated, even when enabled=false,
-    /// so callers can refer to it for diagnostics.
-    dir: PathBuf,
-    translations_path: PathBuf,
-    manifest_path: PathBuf,
-    /// Short hex (first 16 bytes) of the input EPUB hash, used as the directory name.
-    #[allow(dead_code)]
-    input_hash: String,
-    /// Full SHA-256 hex of the input EPUB.
-    input_sha256: String,
-    entries: HashMap<String, String>,
-    stats: CacheStats,
-    keep_cache: bool,
-}
-
-impl CacheStore {
-    fn from_args(input: &Path, args: &CommonArgs) -> Result<Self> {
-        if args.partial_from_cache && args.no_cache {
-            bail!("--partial-from-cache cannot be used with --no-cache");
-        }
-        let (input_sha256, input_hash) = compute_input_hash(input)?;
-        let root = resolve_cache_root(args.cache_root.as_deref())?;
-        let dir = root.join(&input_hash);
-        let translations_path = dir.join(TRANSLATIONS_FILE);
-        let manifest_path = dir.join(MANIFEST_FILE);
-        if args.clear_cache && dir.exists() {
-            fs::remove_dir_all(&dir)
-                .with_context(|| format!("failed to clear cache {}", dir.display()))?;
-        }
-        if args.no_cache {
-            return Ok(Self {
-                enabled: false,
-                dir,
-                translations_path,
-                manifest_path,
-                input_hash,
-                input_sha256,
-                entries: HashMap::new(),
-                stats: CacheStats::default(),
-                keep_cache: args.keep_cache,
-            });
-        }
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create cache dir {}", dir.display()))?;
-        let entries = read_cache_entries(&translations_path)?;
-        Ok(Self {
-            enabled: true,
-            dir,
-            translations_path,
-            manifest_path,
-            input_hash,
-            input_sha256,
-            entries,
-            stats: CacheStats::default(),
-            keep_cache: args.keep_cache,
-        })
-    }
-
-    fn get(&mut self, key: &str) -> Option<String> {
-        if !self.enabled {
-            self.stats.misses += 1;
-            return None;
-        }
-        match self.entries.get(key) {
-            Some(value) => {
-                self.stats.hits += 1;
-                Some(value.clone())
-            }
-            None => {
-                self.stats.misses += 1;
-                None
-            }
-        }
-    }
-
-    fn contains_key(&self, key: &str) -> bool {
-        self.enabled && self.entries.contains_key(key)
-    }
-
-    fn insert(&mut self, record: CacheRecord) -> Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
-        if self.entries.contains_key(&record.key) {
-            return Ok(());
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.translations_path)
-            .with_context(|| {
-                format!("failed to open cache {}", self.translations_path.display())
-            })?;
-        serde_json::to_writer(&mut file, &record)?;
-        writeln!(file)?;
-        file.flush()?;
-        self.entries
-            .insert(record.key.clone(), record.translated.clone());
-        self.stats.writes += 1;
-        Ok(())
-    }
-
-    /// Read or create the manifest, persisting it after fields are filled in.
-    fn upsert_manifest(
-        &self,
-        input: &Path,
-        params: ManifestParams,
-        last_output_path: Option<&Path>,
-    ) -> Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
-        let now = chrono::Utc::now().to_rfc3339();
-        let existing: Option<Manifest> = if self.manifest_path.exists() {
-            let data = fs::read_to_string(&self.manifest_path).with_context(|| {
-                format!("failed to read manifest {}", self.manifest_path.display())
-            })?;
-            serde_json::from_str(&data).ok()
-        } else {
-            None
-        };
-        let metadata = fs::metadata(input).ok();
-        let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-        let mtime = metadata
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| {
-                chrono::DateTime::<chrono::Utc>::from(t)
-                    .to_rfc3339()
-                    .into()
-            });
-        let manifest = match existing {
-            Some(mut m) => {
-                m.params = params;
-                m.timestamps.last_updated_at = now;
-                if let Some(p) = last_output_path {
-                    m.last_output_path = Some(p.display().to_string());
-                }
-                m.input.path_when_started = input.display().to_string();
-                m.input.size_bytes = size_bytes;
-                m.input.mtime = mtime;
-                m
-            }
-            None => Manifest {
-                schema_version: CACHE_SCHEMA_VERSION,
-                input: ManifestInput {
-                    sha256: self.input_sha256.clone(),
-                    path_when_started: input.display().to_string(),
-                    size_bytes,
-                    mtime,
-                },
-                params,
-                timestamps: ManifestTimestamps {
-                    started_at: now.clone(),
-                    last_updated_at: now,
-                },
-                last_output_path: last_output_path.map(|p| p.display().to_string()),
-            },
-        };
-        write_manifest(&self.manifest_path, &manifest)
-    }
-
-    /// Delete the cache directory unless --keep-cache was set. Idempotent: does nothing if disabled.
-    fn finalize_completion(&self) -> Result<()> {
-        if !self.enabled || self.keep_cache {
-            return Ok(());
-        }
-        if self.dir.exists() {
-            fs::remove_dir_all(&self.dir).with_context(|| {
-                format!(
-                    "failed to remove cache directory {}",
-                    self.dir.display()
-                )
-            })?;
-        }
-        Ok(())
-    }
-}
-
-/// Compute (full SHA-256 hex, first-16-byte hex) of the input file.
-fn compute_input_hash(input: &Path) -> Result<(String, String)> {
-    let file = File::open(input)
-        .with_context(|| format!("failed to open input {}", input.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = std::io::Read::read(&mut reader, &mut buf)
-            .with_context(|| format!("failed to read {}", input.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let digest = hasher.finalize();
-    let full: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    let short: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    Ok((full, short))
-}
-
-/// Resolve the cache root directory, preferring the user override.
-/// Default per platform:
-///   Windows: %LOCALAPPDATA%\epubicus\cache (fallback %APPDATA%\epubicus\cache)
-///   Unix:    $XDG_CACHE_HOME/epubicus or ~/.cache/epubicus
-fn resolve_cache_root(override_root: Option<&Path>) -> Result<PathBuf> {
-    if let Some(p) = override_root {
-        return Ok(p.to_path_buf());
-    }
-    if cfg!(windows) {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            return Ok(PathBuf::from(local).join("epubicus").join("cache"));
-        }
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return Ok(PathBuf::from(appdata).join("epubicus").join("cache"));
-        }
-    } else if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
-        return Ok(PathBuf::from(xdg).join("epubicus"));
-    } else if let Some(home) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(home).join(".cache").join("epubicus"));
-    }
-    bail!("cannot determine default cache root; set --cache-root explicitly");
-}
-
-fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(manifest)
-        .context("failed to serialize cache manifest")?;
-    fs::write(&tmp, &data)
-        .with_context(|| format!("failed to write manifest {}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .with_context(|| format!("failed to commit manifest {}", path.display()))?;
-    Ok(())
-}
-
-fn glossary_sha(entries: &[GlossaryEntry]) -> String {
-    if entries.is_empty() {
-        return String::new();
-    }
-    let mut hasher = Sha256::new();
-    for e in entries {
-        hasher.update(e.src.as_bytes());
-        hasher.update(b"=>");
-        hasher.update(e.dst.as_bytes());
-        hasher.update(b"\n");
-    }
-    let digest = hasher.finalize();
-    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -678,9 +105,16 @@ fn translate_command(args: TranslateArgs) -> Result<()> {
         .unwrap_or_else(|| default_output_path(&args.input));
     let book = unpack_epub(&args.input)?;
     let range = normalize_range(args.from, args.to, book.spine.len())?;
+    let usage_only = args.common.usage_only;
     let partial_from_cache = args.common.partial_from_cache;
-    let cache = CacheStore::from_args(&args.input, &args.common)?;
+    let cache_args = cache_args_for_read_only_if_needed(&args.common);
+    let cache = CacheStore::from_args(&args.input, &cache_args)?;
     let mut translator = Translator::new(args.common, cache)?;
+    if usage_only {
+        let report = estimate_usage(&book, range, &translator)?;
+        report.print(&translator);
+        return Ok(());
+    }
     if !partial_from_cache {
         let params = translator.manifest_params();
         translator
@@ -688,7 +122,7 @@ fn translate_command(args: TranslateArgs) -> Result<()> {
             .upsert_manifest(&args.input, params, Some(&output))?;
     }
     let mut stats = translate_book(&book, range, &mut translator, Mode::Write, true)?;
-    update_opf_metadata(&book.opf_path, &translator.model)?;
+    update_opf_metadata(&book.opf_path, &translator.backend.model)?;
     pack_epub(book.work_dir.path(), &output)?;
     stats.pages_seen = book.spine.len();
     let cache_dir_display = if translator.cache.enabled {
@@ -697,8 +131,7 @@ fn translate_command(args: TranslateArgs) -> Result<()> {
         "disabled".to_string()
     };
     let pack_succeeded = true;
-    let full_range_translated =
-        stats.pages_translated == book.spine.len() && !partial_from_cache;
+    let full_range_translated = stats.pages_translated == book.spine.len() && !partial_from_cache;
     let cache_was_kept_or_partial =
         partial_from_cache || translator.cache.keep_cache || !full_range_translated;
     if pack_succeeded && !cache_was_kept_or_partial {
@@ -716,386 +149,54 @@ fn translate_command(args: TranslateArgs) -> Result<()> {
         output.display(),
         stats.pages_translated,
         stats.blocks_translated,
-        translator.provider,
-        translator.model,
+        translator.backend.provider,
+        translator.backend.model,
         translator.cache.stats.hits,
         translator.cache.stats.misses,
         translator.cache.stats.writes,
         cache_status,
     );
+    if let Some(summary) = translator.api_usage_summary() {
+        eprintln!("API usage: {summary}");
+    }
+    if translator.fallback_count > 0 {
+        eprintln!("Fallback translations: {}", translator.fallback_count);
+    }
     Ok(())
 }
 
 fn test_command(args: TestArgs) -> Result<()> {
     let book = unpack_epub(&args.input)?;
     let range = normalize_range(Some(args.from), Some(args.to), book.spine.len())?;
-    let cache = CacheStore::from_args(&args.input, &args.common)?;
+    let usage_only = args.common.usage_only;
+    let cache_args = cache_args_for_read_only_if_needed(&args.common);
+    let cache = CacheStore::from_args(&args.input, &cache_args)?;
     let mut translator = Translator::new(args.common, cache)?;
+    if usage_only {
+        let report = estimate_usage(&book, range, &translator)?;
+        report.print(&translator);
+        return Ok(());
+    }
     let stats = translate_book(&book, range, &mut translator, Mode::Stdout, false)?;
     eprintln!(
         "Translated {} spine pages, {} blocks.",
         stats.pages_translated, stats.blocks_translated
     );
-    Ok(())
-}
-
-fn cache_command(args: CacheArgs) -> Result<()> {
-    let root = resolve_cache_root(args.cache_root.as_deref())?;
-    match args.command {
-        CacheCommand::List => cache_list(&root),
-        CacheCommand::Show { target } => cache_show(&root, &target),
-        CacheCommand::Prune {
-            older_than,
-            yes,
-            dry_run,
-        } => cache_prune(&root, older_than, yes, dry_run),
-        CacheCommand::Clear {
-            hash,
-            all,
-            yes,
-            dry_run,
-        } => cache_clear(&root, hash.as_deref(), all, yes, dry_run),
+    if let Some(summary) = translator.api_usage_summary() {
+        eprintln!("API usage: {summary}");
     }
-}
-
-#[derive(Debug)]
-struct CacheEntryInfo {
-    hash: String,
-    dir: PathBuf,
-    manifest: Option<Manifest>,
-    cached_segments: usize,
-    size_bytes: u64,
-}
-
-fn collect_cache_entries(root: &Path) -> Result<Vec<CacheEntryInfo>> {
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("failed to read cache root {}", root.display()))?
-    {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let dir = entry.path();
-        let hash = entry.file_name().to_string_lossy().to_string();
-        let manifest_path = dir.join(MANIFEST_FILE);
-        let manifest: Option<Manifest> = if manifest_path.exists() {
-            let data = fs::read_to_string(&manifest_path).ok();
-            data.and_then(|s| serde_json::from_str(&s).ok())
-        } else {
-            None
-        };
-        let translations_path = dir.join(TRANSLATIONS_FILE);
-        let cached_segments = if translations_path.exists() {
-            count_jsonl_lines(&translations_path).unwrap_or(0)
-        } else {
-            0
-        };
-        let size_bytes = directory_size(&dir).unwrap_or(0);
-        out.push(CacheEntryInfo {
-            hash,
-            dir,
-            manifest,
-            cached_segments,
-            size_bytes,
-        });
-    }
-    out.sort_by(|a, b| {
-        let aa = a
-            .manifest
-            .as_ref()
-            .map(|m| m.timestamps.last_updated_at.clone())
-            .unwrap_or_default();
-        let bb = b
-            .manifest
-            .as_ref()
-            .map(|m| m.timestamps.last_updated_at.clone())
-            .unwrap_or_default();
-        bb.cmp(&aa)
-    });
-    Ok(out)
-}
-
-fn count_jsonl_lines(path: &Path) -> Result<usize> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut count = 0usize;
-    for line in reader.lines() {
-        let line = line?;
-        if !line.trim().is_empty() {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-fn directory_size(dir: &Path) -> Result<u64> {
-    let mut total = 0u64;
-    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            if let Ok(meta) = entry.metadata() {
-                total += meta.len();
-            }
-        }
-    }
-    Ok(total)
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn cache_list(root: &Path) -> Result<()> {
-    let entries = collect_cache_entries(root)?;
-    println!("Cache root: {}", root.display());
-    if entries.is_empty() {
-        println!("(no cached runs)");
-        return Ok(());
-    }
-    println!();
-    println!(
-        "{:<32}  {:>8}  {:>10}  {:<25}  {}",
-        "Hash", "Segs", "Size", "Last Updated", "Input"
-    );
-    println!("{}", "-".repeat(110));
-    for e in &entries {
-        let last = e
-            .manifest
-            .as_ref()
-            .map(|m| m.timestamps.last_updated_at.as_str())
-            .unwrap_or("-");
-        let input = e
-            .manifest
-            .as_ref()
-            .map(|m| m.input.path_when_started.as_str())
-            .unwrap_or("(no manifest)");
-        println!(
-            "{:<32}  {:>8}  {:>10}  {:<25}  {}",
-            e.hash,
-            e.cached_segments,
-            human_bytes(e.size_bytes),
-            last,
-            input,
-        );
-    }
-    println!();
-    let total: u64 = entries.iter().map(|e| e.size_bytes).sum();
-    println!(
-        "Total: {} run(s), {}",
-        entries.len(),
-        human_bytes(total)
-    );
-    Ok(())
-}
-
-fn cache_show(root: &Path, target: &str) -> Result<()> {
-    let entry = resolve_cache_target(root, target)?;
-    println!("Hash:       {}", entry.hash);
-    println!("Directory:  {}", entry.dir.display());
-    println!("Size:       {}", human_bytes(entry.size_bytes));
-    println!("Segments:   {}", entry.cached_segments);
-    if let Some(manifest) = &entry.manifest {
-        println!();
-        let pretty = serde_json::to_string_pretty(manifest)?;
-        println!("{pretty}");
-    } else {
-        println!("(manifest.json missing)");
+    if translator.fallback_count > 0 {
+        eprintln!("Fallback translations: {}", translator.fallback_count);
     }
     Ok(())
 }
 
-fn resolve_cache_target(root: &Path, target: &str) -> Result<CacheEntryInfo> {
-    let target_path = Path::new(target);
-    let entries = collect_cache_entries(root)?;
-    if target_path.exists() && target_path.is_file() {
-        let (_, short) = compute_input_hash(target_path)?;
-        return entries
-            .into_iter()
-            .find(|e| e.hash == short)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no cached run found for input {} (hash {})",
-                    target_path.display(),
-                    short
-                )
-            });
+fn cache_args_for_read_only_if_needed(args: &CommonArgs) -> CommonArgs {
+    let mut args = args.clone();
+    if args.usage_only {
+        args.clear_cache = false;
     }
-    let matches: Vec<_> = entries
-        .into_iter()
-        .filter(|e| e.hash.starts_with(target))
-        .collect();
-    match matches.len() {
-        0 => bail!("no cached run matches '{target}'"),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        n => bail!("'{target}' is ambiguous: matches {n} cached runs"),
-    }
-}
-
-fn cache_prune(root: &Path, older_than_days: u64, yes: bool, dry_run: bool) -> Result<()> {
-    let entries = collect_cache_entries(root)?;
-    if entries.is_empty() {
-        println!("(no cached runs)");
-        return Ok(());
-    }
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(older_than_days as i64);
-    let mut victims = Vec::new();
-    for e in entries {
-        let Some(manifest) = e.manifest.as_ref() else {
-            continue;
-        };
-        let Ok(last) =
-            chrono::DateTime::parse_from_rfc3339(&manifest.timestamps.last_updated_at)
-        else {
-            continue;
-        };
-        if last.with_timezone(&chrono::Utc) < cutoff {
-            victims.push(e);
-        }
-    }
-    if victims.is_empty() {
-        println!("No cached runs older than {older_than_days} day(s).");
-        return Ok(());
-    }
-    println!(
-        "About to delete {} cached run(s) older than {} day(s):",
-        victims.len(),
-        older_than_days
-    );
-    for v in &victims {
-        let last = v
-            .manifest
-            .as_ref()
-            .map(|m| m.timestamps.last_updated_at.as_str())
-            .unwrap_or("-");
-        println!(
-            "  - {} ({}, last updated {})",
-            v.hash,
-            human_bytes(v.size_bytes),
-            last
-        );
-    }
-    if dry_run {
-        println!("(dry run; nothing deleted)");
-        return Ok(());
-    }
-    if !yes {
-        eprint!("Type 'yes' to confirm: ");
-        std::io::stderr().flush().ok();
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
-        if buf.trim() != "yes" {
-            println!("Aborted.");
-            return Ok(());
-        }
-    }
-    let mut freed = 0u64;
-    for v in &victims {
-        fs::remove_dir_all(&v.dir).with_context(|| {
-            format!("failed to remove cache dir {}", v.dir.display())
-        })?;
-        freed += v.size_bytes;
-    }
-    println!(
-        "Deleted {} run(s); freed {}.",
-        victims.len(),
-        human_bytes(freed)
-    );
-    Ok(())
-}
-
-fn cache_clear(
-    root: &Path,
-    hash: Option<&str>,
-    all: bool,
-    yes: bool,
-    dry_run: bool,
-) -> Result<()> {
-    if !all && hash.is_none() {
-        bail!("specify --hash <HASH> or --all");
-    }
-    if all {
-        let entries = collect_cache_entries(root)?;
-        if entries.is_empty() {
-            println!("(no cached runs)");
-            return Ok(());
-        }
-        let total_size: u64 = entries.iter().map(|e| e.size_bytes).sum();
-        println!(
-            "About to delete all {} cached run(s) (total {}):",
-            entries.len(),
-            human_bytes(total_size)
-        );
-        for e in &entries {
-            let last = e
-                .manifest
-                .as_ref()
-                .map(|m| m.timestamps.last_updated_at.as_str())
-                .unwrap_or("-");
-            let input = e
-                .manifest
-                .as_ref()
-                .map(|m| m.input.path_when_started.as_str())
-                .unwrap_or("(no manifest)");
-            println!(
-                "  - {} ({}, last {}) {}",
-                e.hash,
-                human_bytes(e.size_bytes),
-                last,
-                input,
-            );
-        }
-        println!("(output EPUB files are NOT touched)");
-        if dry_run {
-            println!("(dry run; nothing deleted)");
-            return Ok(());
-        }
-        if !yes {
-            eprint!("Type 'yes' to confirm: ");
-            std::io::stderr().flush().ok();
-            let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf)?;
-            if buf.trim() != "yes" {
-                println!("Aborted.");
-                return Ok(());
-            }
-        }
-        for e in &entries {
-            fs::remove_dir_all(&e.dir).with_context(|| {
-                format!("failed to remove cache dir {}", e.dir.display())
-            })?;
-        }
-        println!("Deleted {} run(s); freed {}.", entries.len(), human_bytes(total_size));
-        return Ok(());
-    }
-    let hash = hash.unwrap();
-    let entry = resolve_cache_target(root, hash)?;
-    if dry_run {
-        println!(
-            "Would delete {} ({})",
-            entry.hash,
-            human_bytes(entry.size_bytes)
-        );
-        return Ok(());
-    }
-    fs::remove_dir_all(&entry.dir).with_context(|| {
-        format!("failed to remove cache dir {}", entry.dir.display())
-    })?;
-    println!("Deleted {} ({}).", entry.hash, human_bytes(entry.size_bytes));
-    Ok(())
+    args
 }
 
 fn inspect_command(args: InspectArgs) -> Result<()> {
@@ -1159,81 +260,17 @@ fn toc_command(args: TocArgs) -> Result<()> {
     bail!("no EPUB3 nav.xhtml or EPUB2 NCX item found in OPF manifest")
 }
 
-fn glossary_command(args: GlossaryArgs) -> Result<()> {
-    let book = unpack_epub(&args.input)?;
-    let candidates = extract_glossary_candidates(&book, args.min_occurrences, args.max_entries)?;
-    let glossary = GlossaryFile {
-        model: None,
-        source_lang: Some("en".to_string()),
-        target_lang: Some("ja".to_string()),
-        entries: candidates
-            .into_iter()
-            .map(|candidate| GlossaryEntry {
-                src: candidate.term,
-                dst: String::new(),
-                kind: Some(candidate.kind),
-                note: Some(format!("occurrences: {}", candidate.count)),
-            })
-            .collect(),
-    };
-    let json = serde_json::to_string_pretty(&glossary)?;
-    fs::write(&args.output, json)
-        .with_context(|| format!("failed to write {}", args.output.display()))?;
-    if let Some(path) = &args.review_prompt {
-        let prompt = glossary_review_prompt(&glossary);
-        fs::write(path, prompt).with_context(|| format!("failed to write {}", path.display()))?;
-        eprintln!("Wrote glossary review prompt to {}", path.display());
-    }
-    eprintln!(
-        "Wrote {} glossary candidates to {}",
-        glossary.entries.len(),
-        args.output.display()
-    );
-    Ok(())
-}
-
-fn glossary_review_prompt(glossary: &GlossaryFile) -> String {
-    let json = serde_json::to_string_pretty(glossary).unwrap_or_else(|_| "{}".to_string());
-    format!(
-        r#"# EPUB 翻訳用語集レビュー依頼
-
-以下は、英語 EPUB から自動抽出した用語集候補です。
-この文章全体を作業指示として読み、最後の JSON を修正してください。
-
-## 作業目的
-
-英日翻訳で表記ゆれを防ぐため、人名、地名、組織名、製品名、作品名、専門用語を整理した用語集 JSON を作成してください。
-
-## 入力 JSON の見方
-
-- `src`: 原文に出てきた英語表記です。
-- `dst`: 日本語訳語です。空欄なので、自然で一貫した訳語を入れてください。
-- `kind`: 候補の種類です。必要に応じて修正してください。
-- `note`: 出現回数などのコメントです。判断材料として使い、必要なら短い補足コメントに直してください。
-
-## 修正方針
-
-- 重要な人名、地名、組織名、製品名、プロジェクト名、作品名、専門用語を残してください。
-- 誤検出、章見出し、一般語、文頭に多いだけの単語は削除してください。
-- 同じ対象を指す表記ゆれや重複は、最も標準的な `src` に統合してください。
-- `dst` には、文脈上自然な日本語訳または一般的なカタカナ表記を入れてください。
-- `kind` は次のいずれかにしてください: `person`, `place`, `organization`, `product`, `term`, `work`, `other`
-- 判断に迷う候補は、残す場合だけ `note` に短い理由を入れてください。
-- 出力は有効な JSON のみ。Markdown のコードフェンスや説明文は付けないでください。
-- JSON の形は `source_lang`, `target_lang`, `entries` を維持してください。
-
-## 修正対象 JSON
-
-```json
-{json}
-```
-"#
-    )
-}
-
 fn default_output_path(input: &Path) -> PathBuf {
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
     input.with_file_name(format!("{stem}.ja.epub"))
+}
+
+fn default_model_for_provider(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Ollama => DEFAULT_MODEL,
+        Provider::Openai => DEFAULT_OPENAI_MODEL,
+        Provider::Claude => DEFAULT_CLAUDE_MODEL,
+    }
 }
 
 fn normalize_range(
@@ -1250,640 +287,6 @@ fn normalize_range(
         bail!("invalid range {from}-{to}; valid spine page range is 1-{len}");
     }
     Ok(from..=to)
-}
-
-fn unpack_epub(input: &Path) -> Result<EpubBook> {
-    let file = File::open(input).with_context(|| format!("failed to open {}", input.display()))?;
-    let mut archive =
-        ZipArchive::new(BufReader::new(file)).context("input is not a valid EPUB/ZIP")?;
-    let work_dir = tempfile::tempdir().context("failed to create temp dir")?;
-    archive
-        .extract(work_dir.path())
-        .context("failed to unpack EPUB")?;
-
-    let container_path = work_dir.path().join("META-INF").join("container.xml");
-    let opf_rel = read_container_rootfile(&container_path)?;
-    let opf_path = work_dir.path().join(normalize_epub_path(&opf_rel));
-    let opf_dir = opf_path.parent().unwrap_or(work_dir.path()).to_path_buf();
-    let opf = read_opf(&opf_path, &opf_dir)?;
-    Ok(EpubBook {
-        work_dir,
-        opf_path,
-        manifest: opf.manifest,
-        spine: opf.spine,
-    })
-}
-
-fn read_container_rootfile(container_path: &Path) -> Result<String> {
-    let mut reader = Reader::from_file(container_path)
-        .with_context(|| format!("failed to read {}", container_path.display()))?;
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) | Event::Empty(e) if local_name(e.name().as_ref()) == b"rootfile" => {
-                for attr in e.attributes().with_checks(false) {
-                    let attr = attr?;
-                    if local_name(attr.key.as_ref()) == b"full-path" {
-                        return Ok(attr
-                            .decode_and_unescape_value(reader.decoder())?
-                            .into_owned());
-                    }
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    bail!("META-INF/container.xml does not contain a rootfile full-path")
-}
-
-struct OpfData {
-    manifest: Vec<ManifestItem>,
-    spine: Vec<SpineItem>,
-}
-
-fn read_opf(opf_path: &Path, opf_dir: &Path) -> Result<OpfData> {
-    let mut reader = Reader::from_file(opf_path)
-        .with_context(|| format!("failed to read {}", opf_path.display()))?;
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut manifest = Vec::new();
-    let mut idrefs = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) | Event::Empty(e) if local_name(e.name().as_ref()) == b"item" => {
-                let mut id = None;
-                let mut href = None;
-                let mut media_type = None;
-                let mut properties = Vec::new();
-                for attr in e.attributes().with_checks(false) {
-                    let attr = attr?;
-                    let value = attr
-                        .decode_and_unescape_value(reader.decoder())?
-                        .into_owned();
-                    match local_name(attr.key.as_ref()) {
-                        b"id" => id = Some(value),
-                        b"href" => href = Some(value),
-                        b"media-type" => media_type = Some(value),
-                        b"properties" => {
-                            properties = value.split_whitespace().map(str::to_string).collect()
-                        }
-                        _ => {}
-                    }
-                }
-                if let (Some(id), Some(href), Some(media_type)) = (id, href, media_type) {
-                    let abs_path = opf_dir.join(normalize_epub_path(&href));
-                    manifest.push(ManifestItem {
-                        id,
-                        href,
-                        abs_path,
-                        media_type,
-                        properties,
-                    });
-                }
-            }
-            Event::Start(e) | Event::Empty(e) if local_name(e.name().as_ref()) == b"itemref" => {
-                let mut idref = None;
-                let mut linear = true;
-                for attr in e.attributes().with_checks(false) {
-                    let attr = attr?;
-                    let value = attr
-                        .decode_and_unescape_value(reader.decoder())?
-                        .into_owned();
-                    match local_name(attr.key.as_ref()) {
-                        b"idref" => idref = Some(value),
-                        b"linear" => linear = value != "no",
-                        _ => {}
-                    }
-                }
-                if let Some(idref) = idref {
-                    idrefs.push(SpineRef { idref, linear });
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    let mut spine = Vec::new();
-    let manifest_by_id = manifest
-        .iter()
-        .map(|item| (item.id.as_str(), item))
-        .collect::<HashMap<_, _>>();
-    for spine_ref in idrefs {
-        let Some(item) = manifest_by_id.get(spine_ref.idref.as_str()) else {
-            continue;
-        };
-        if item.media_type == "application/xhtml+xml"
-            || item.href.ends_with(".xhtml")
-            || item.href.ends_with(".html")
-        {
-            spine.push(SpineItem {
-                idref: spine_ref.idref,
-                href: item.href.clone(),
-                abs_path: item.abs_path.clone(),
-                media_type: item.media_type.clone(),
-                linear: spine_ref.linear,
-            });
-        }
-    }
-    Ok(OpfData { manifest, spine })
-}
-
-fn count_xhtml_blocks(path: &Path) -> Result<usize> {
-    let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut reader = Reader::from_reader(Cursor::new(source));
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
-    let mut count = 0usize;
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_block_tag(e.name()) => count += 1,
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    Ok(count)
-}
-
-fn extract_glossary_candidates(
-    book: &EpubBook,
-    min_occurrences: usize,
-    max_entries: usize,
-) -> Result<Vec<GlossaryCandidate>> {
-    let mut counts = HashMap::<String, usize>::new();
-    for item in &book.spine {
-        let text = extract_plain_text(&item.abs_path)?;
-        for candidate in find_term_candidates(&text) {
-            *counts.entry(candidate).or_default() += 1;
-        }
-    }
-    let mut candidates = counts
-        .into_iter()
-        .filter(|(_, count)| *count >= min_occurrences)
-        .filter(|(term, _)| !is_glossary_stopword(term))
-        .map(|(term, count)| GlossaryCandidate {
-            kind: infer_glossary_kind(&term).to_string(),
-            term,
-            count,
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| a.term.to_lowercase().cmp(&b.term.to_lowercase()))
-    });
-    candidates.truncate(max_entries);
-    Ok(candidates)
-}
-
-fn extract_plain_text(path: &Path) -> Result<String> {
-    let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut reader = Reader::from_reader(Cursor::new(source));
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
-    let mut out = String::new();
-    let mut skip_depth = 0usize;
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_never_translate_tag(e.name().as_ref()) => skip_depth += 1,
-            Event::End(e) if is_never_translate_tag(e.name().as_ref()) => {
-                skip_depth = skip_depth.saturating_sub(1);
-            }
-            Event::Text(t) if skip_depth == 0 => {
-                out.push_str(&t.decode()?);
-                out.push(' ');
-            }
-            Event::CData(t) if skip_depth == 0 => {
-                out.push_str(&String::from_utf8_lossy(t.as_ref()));
-                out.push(' ');
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    Ok(out)
-}
-
-fn find_term_candidates(text: &str) -> Vec<String> {
-    let words = text
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\'' && ch != '-')
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    let mut candidates = Vec::new();
-    let mut i = 0usize;
-    while i < words.len() {
-        if !is_capitalized_term_word(words[i]) {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        i += 1;
-        while i < words.len() && is_capitalized_term_word(words[i]) {
-            i += 1;
-        }
-        let len = i - start;
-        if len == 1 {
-            let word = words[start].trim_matches('\'');
-            if word.len() >= 4 && !is_common_sentence_start(word) {
-                candidates.push(word.to_string());
-            }
-        } else {
-            let term = words[start..i].join(" ");
-            if term.len() >= 4 {
-                candidates.push(term);
-            }
-        }
-    }
-    candidates
-}
-
-fn is_capitalized_term_word(word: &str) -> bool {
-    let word = word.trim_matches('\'');
-    let mut chars = word.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_uppercase()
-        && chars.any(|ch| ch.is_ascii_lowercase())
-        && !word.chars().all(|ch| ch.is_ascii_uppercase())
-}
-
-fn is_common_sentence_start(word: &str) -> bool {
-    matches!(
-        word,
-        "The"
-            | "This"
-            | "That"
-            | "These"
-            | "Those"
-            | "There"
-            | "When"
-            | "Where"
-            | "While"
-            | "After"
-            | "Before"
-            | "Because"
-            | "Although"
-            | "However"
-            | "He"
-            | "She"
-            | "They"
-            | "We"
-            | "I"
-            | "It"
-            | "Its"
-            | "His"
-            | "Her"
-            | "Their"
-            | "Our"
-            | "You"
-            | "Your"
-            | "What"
-            | "Who"
-            | "Why"
-            | "How"
-            | "Chapter"
-            | "Part"
-            | "Table"
-            | "Figure"
-    )
-}
-
-fn is_glossary_stopword(term: &str) -> bool {
-    is_common_sentence_start(term)
-        || matches!(
-            term,
-            "Title Page" | "Copyright" | "Contents" | "Table of Contents" | "Introduction"
-        )
-}
-
-fn infer_glossary_kind(term: &str) -> &'static str {
-    if term.split_whitespace().count() >= 2 {
-        "proper-noun"
-    } else {
-        "term"
-    }
-}
-
-#[derive(Debug)]
-struct TocEntry {
-    level: usize,
-    label: String,
-    href: Option<String>,
-}
-
-fn find_nav_item(manifest: &[ManifestItem]) -> Option<&ManifestItem> {
-    manifest
-        .iter()
-        .find(|item| {
-            item.media_type == "application/xhtml+xml"
-                && item.properties.iter().any(|property| property == "nav")
-        })
-        .or_else(|| {
-            manifest.iter().find(|item| {
-                item.media_type == "application/xhtml+xml"
-                    && (item.href.ends_with("nav.xhtml")
-                        || item.href.ends_with("nav.html")
-                        || item.href.ends_with("toc.xhtml")
-                        || item.href.ends_with("toc.html"))
-            })
-        })
-}
-
-fn find_ncx_item(manifest: &[ManifestItem]) -> Option<&ManifestItem> {
-    manifest
-        .iter()
-        .find(|item| item.media_type == "application/x-dtbncx+xml")
-}
-
-fn read_nav_toc(path: &Path) -> Result<Vec<TocEntry>> {
-    let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut reader = Reader::from_reader(Cursor::new(source));
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
-    let mut in_toc_nav = false;
-    let mut nav_depth = 0usize;
-    let mut list_depth = 0usize;
-    let mut current_anchor: Option<(usize, String, String)> = None;
-    let mut entries = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if local_name(e.name().as_ref()) == b"nav" => {
-                if is_toc_nav(&e, reader.decoder())? {
-                    in_toc_nav = true;
-                    nav_depth = 1;
-                }
-            }
-            Event::Start(e) if in_toc_nav => {
-                nav_depth += 1;
-                match local_name(e.name().as_ref()) {
-                    b"ol" | b"ul" => list_depth += 1,
-                    b"a" => {
-                        let href = attr_value(&e, reader.decoder(), b"href")?.unwrap_or_default();
-                        current_anchor = Some((list_depth.max(1), href, String::new()));
-                    }
-                    _ => {}
-                }
-            }
-            Event::Text(t) if current_anchor.is_some() => {
-                if let Some((_, _, label)) = current_anchor.as_mut() {
-                    label.push_str(&t.decode()?);
-                }
-            }
-            Event::CData(t) if current_anchor.is_some() => {
-                if let Some((_, _, label)) = current_anchor.as_mut() {
-                    label.push_str(&String::from_utf8_lossy(t.as_ref()));
-                }
-            }
-            Event::End(e) if in_toc_nav && local_name(e.name().as_ref()) == b"a" => {
-                if let Some((level, href, label)) = current_anchor.take() {
-                    let label = collapse_ws(&label);
-                    if !label.is_empty() {
-                        entries.push(TocEntry {
-                            level,
-                            label,
-                            href: if href.is_empty() { None } else { Some(href) },
-                        });
-                    }
-                }
-            }
-            Event::End(e) if in_toc_nav => {
-                match local_name(e.name().as_ref()) {
-                    b"ol" | b"ul" => list_depth = list_depth.saturating_sub(1),
-                    b"nav" if nav_depth == 1 => break,
-                    _ => {}
-                }
-                nav_depth = nav_depth.saturating_sub(1);
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    Ok(entries)
-}
-
-fn is_toc_nav(e: &BytesStart<'_>, decoder: quick_xml::encoding::Decoder) -> Result<bool> {
-    let mut epub_type = None;
-    let mut role = None;
-    for attr in e.attributes().with_checks(false) {
-        let attr = attr?;
-        let value = attr.decode_and_unescape_value(decoder)?.into_owned();
-        match local_name(attr.key.as_ref()) {
-            b"type" => epub_type = Some(value),
-            b"role" => role = Some(value),
-            _ => {}
-        }
-    }
-    Ok(epub_type
-        .as_deref()
-        .map(|value| value.split_whitespace().any(|part| part == "toc"))
-        .unwrap_or(false)
-        || role.as_deref() == Some("doc-toc"))
-}
-
-fn read_ncx_toc(path: &Path) -> Result<Vec<TocEntry>> {
-    let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut reader = Reader::from_reader(Cursor::new(source));
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
-    let mut stack = Vec::<NcxNavPoint>::new();
-    let mut in_text = false;
-    let mut entries = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if local_name(e.name().as_ref()) == b"navPoint" => {
-                stack.push(NcxNavPoint::default());
-            }
-            Event::Start(e) if local_name(e.name().as_ref()) == b"text" && !stack.is_empty() => {
-                in_text = true;
-            }
-            Event::Empty(e) | Event::Start(e)
-                if local_name(e.name().as_ref()) == b"content" && !stack.is_empty() =>
-            {
-                if let Some(src) = attr_value(&e, reader.decoder(), b"src")? {
-                    if let Some(current) = stack.last_mut() {
-                        current.href = Some(src);
-                    }
-                }
-            }
-            Event::Text(t) if in_text => {
-                if let Some(current) = stack.last_mut() {
-                    current.label.push_str(&t.decode()?);
-                }
-            }
-            Event::CData(t) if in_text => {
-                if let Some(current) = stack.last_mut() {
-                    current.label.push_str(&String::from_utf8_lossy(t.as_ref()));
-                }
-            }
-            Event::End(e) if local_name(e.name().as_ref()) == b"text" => {
-                in_text = false;
-            }
-            Event::End(e) if local_name(e.name().as_ref()) == b"navPoint" => {
-                if let Some(point) = stack.pop() {
-                    let label = collapse_ws(&point.label);
-                    if !label.is_empty() {
-                        entries.push(TocEntry {
-                            level: stack.len() + 1,
-                            label,
-                            href: point.href,
-                        });
-                    }
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    Ok(entries)
-}
-
-#[derive(Default)]
-struct NcxNavPoint {
-    label: String,
-    href: Option<String>,
-}
-
-fn attr_value(
-    e: &BytesStart<'_>,
-    decoder: quick_xml::encoding::Decoder,
-    name: &[u8],
-) -> Result<Option<String>> {
-    for attr in e.attributes().with_checks(false) {
-        let attr = attr?;
-        if local_name(attr.key.as_ref()) == name {
-            return Ok(Some(attr.decode_and_unescape_value(decoder)?.into_owned()));
-        }
-    }
-    Ok(None)
-}
-
-fn print_toc_entries(entries: &[TocEntry]) {
-    if entries.is_empty() {
-        println!("(no TOC entries found)");
-        return;
-    }
-    for entry in entries {
-        let indent = "  ".repeat(entry.level.saturating_sub(1));
-        match &entry.href {
-            Some(href) => println!("{}- {} -> {}", indent, entry.label, href),
-            None => println!("{}- {}", indent, entry.label),
-        }
-    }
-}
-
-struct ProgressReporter {
-    bar: ProgressBar,
-    total_blocks: u64,
-    cached_blocks: u64,
-    model_blocks: usize,
-    started: Instant,
-    page_message: String,
-}
-
-impl ProgressReporter {
-    fn new(total_blocks: u64, cached_blocks: u64) -> Result<Self> {
-        let bar = ProgressBar::new(total_blocks);
-        bar.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} blocks | {msg}",
-            )?
-            .progress_chars("=> "),
-        );
-        if cached_blocks > 0 {
-            bar.set_position(cached_blocks);
-        }
-        let reporter = Self {
-            bar,
-            total_blocks,
-            cached_blocks,
-            model_blocks: 0,
-            started: Instant::now(),
-            page_message: if cached_blocks > 0 {
-                format!("resuming: {cached_blocks}/{total_blocks} cached")
-            } else {
-                "preparing".to_string()
-            },
-        };
-        reporter.refresh_message();
-        Ok(reporter)
-    }
-
-    fn set_page(&mut self, page_no: usize, total_pages: usize, href: &str) {
-        let prefix = if self.cached_blocks > 0 {
-            format!("cached {}/{} | ", self.cached_blocks, self.total_blocks)
-        } else {
-            String::new()
-        };
-        self.page_message = format!("{prefix}page {page_no}/{total_pages} {href}");
-        self.refresh_message();
-    }
-
-    fn inc_model_block(&mut self) {
-        self.model_blocks += 1;
-        self.bar.inc(1);
-        self.refresh_message();
-    }
-
-    fn inc_passthrough_block(&mut self) {
-        self.bar.inc(1);
-        self.refresh_message();
-    }
-
-    fn finish(self, stats: &Stats) {
-        self.bar.finish_with_message(format!(
-            "done: {} pages, {} blocks",
-            stats.pages_translated, stats.blocks_translated
-        ));
-    }
-
-    fn refresh_message(&self) {
-        self.bar
-            .set_message(format!("{} | {}", self.eta_message(), self.page_message));
-    }
-
-    fn eta_message(&self) -> String {
-        let pos = self.bar.position();
-        let remaining = self.total_blocks.saturating_sub(pos);
-        if remaining == 0 {
-            return "ETA done".to_string();
-        }
-        if self.model_blocks < ETA_MIN_MODEL_BLOCKS {
-            return format!(
-                "ETA warming up ({}/{ETA_MIN_MODEL_BLOCKS} model blocks)",
-                self.model_blocks
-            );
-        }
-        let elapsed = self.started.elapsed();
-        if elapsed < Duration::from_secs(ETA_MIN_ELAPSED_SECS) {
-            return format!(
-                "ETA warming up ({}s/{ETA_MIN_ELAPSED_SECS}s)",
-                elapsed.as_secs()
-            );
-        }
-        let seconds_per_block = elapsed.as_secs_f64() / self.model_blocks as f64;
-        let eta = Duration::from_secs_f64(seconds_per_block * remaining as f64);
-        format!("ETA {}", format_duration_hms(eta))
-    }
-}
-
-fn format_duration_hms(duration: Duration) -> String {
-    let total = duration.as_secs();
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 fn translate_book(
@@ -1922,6 +325,136 @@ fn translate_book(
         progress.finish(&stats);
     }
     Ok(stats)
+}
+
+#[derive(Debug, Default)]
+struct UsageEstimate {
+    pages_selected: usize,
+    total_pages: usize,
+    blocks_total: usize,
+    cached_blocks: usize,
+    uncached_blocks: usize,
+    source_chars: usize,
+    uncached_source_chars: usize,
+    estimated_requests: usize,
+    estimated_input_tokens: u64,
+    estimated_output_tokens: u64,
+}
+
+impl UsageEstimate {
+    fn estimated_total_tokens(&self) -> u64 {
+        self.estimated_input_tokens + self.estimated_output_tokens
+    }
+
+    fn print(&self, translator: &Translator) {
+        println!("Usage estimate only. No translation provider was called.");
+        println!("Provider: {}", translator.backend.provider);
+        println!("Model: {}", translator.backend.model);
+        if let Some(fallback) = &translator.fallback_backend {
+            println!("Fallback provider: {}", fallback.provider);
+            println!("Fallback model: {}", fallback.model);
+        }
+        println!(
+            "Pages: {}/{} selected",
+            self.pages_selected, self.total_pages
+        );
+        println!(
+            "Blocks: {} total, {} cached, {} uncached",
+            self.blocks_total, self.cached_blocks, self.uncached_blocks
+        );
+        println!(
+            "Source chars: {} total, {} uncached",
+            self.source_chars, self.uncached_source_chars
+        );
+        println!("Estimated API requests: {}", self.estimated_requests);
+        println!(
+            "Estimated tokens: input {}, output {}, total {}",
+            self.estimated_input_tokens,
+            self.estimated_output_tokens,
+            self.estimated_total_tokens()
+        );
+        println!("Note: token counts are approximate before the API returns actual usage.");
+    }
+}
+
+fn estimate_usage(
+    book: &EpubBook,
+    range: std::ops::RangeInclusive<usize>,
+    translator: &Translator,
+) -> Result<UsageEstimate> {
+    let selected: HashSet<usize> = range.collect();
+    let mut estimate = UsageEstimate {
+        pages_selected: selected.len(),
+        total_pages: book.spine.len(),
+        ..UsageEstimate::default()
+    };
+    for (idx, item) in book.spine.iter().enumerate() {
+        if !selected.contains(&(idx + 1)) {
+            continue;
+        }
+        estimate_xhtml_usage(&item.abs_path, translator, &mut estimate)
+            .with_context(|| format!("failed to estimate usage for {}", item.href))?;
+    }
+    Ok(estimate)
+}
+
+fn estimate_xhtml_usage(
+    path: &Path,
+    translator: &Translator,
+    estimate: &mut UsageEstimate,
+) -> Result<()> {
+    let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut reader = Reader::from_reader(Cursor::new(source));
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(e) if is_block_tag(e.name()) => {
+                let end_name = e.name().as_ref().to_vec();
+                let inner = collect_element_inner(&mut reader, &end_name)?;
+                let (source_text, _) = encode_inline(&inner)?;
+                let source_text = source_text.trim();
+                if !source_text.is_empty() {
+                    estimate.blocks_total += 1;
+                    let source_chars = source_text.chars().count();
+                    estimate.source_chars += source_chars;
+                    if translator.has_cached_translation(source_text) {
+                        estimate.cached_blocks += 1;
+                    } else {
+                        estimate.uncached_blocks += 1;
+                        estimate.uncached_source_chars += source_chars;
+                        add_uncached_usage_estimate(source_text, translator, estimate);
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+fn add_uncached_usage_estimate(
+    source: &str,
+    translator: &Translator,
+    estimate: &mut UsageEstimate,
+) {
+    let chunks = split_translation_chunks(source, translator.backend.max_chars_per_request);
+    let system = system_prompt(&translator.backend.style);
+    for chunk in chunks {
+        let glossary_subset = translator.backend.glossary_subset(&chunk);
+        let prompt = user_prompt(&chunk, &glossary_subset);
+        estimate.estimated_requests += 1;
+        estimate.estimated_input_tokens += estimate_tokens_from_chars(system.chars().count());
+        estimate.estimated_input_tokens += estimate_tokens_from_chars(prompt.chars().count());
+        estimate.estimated_output_tokens += estimate_tokens_from_chars(chunk.chars().count());
+    }
+}
+
+fn estimate_tokens_from_chars(chars: usize) -> u64 {
+    chars.div_ceil(4) as u64
 }
 
 fn count_selected_blocks(book: &EpubBook, selected: &HashSet<usize>) -> Result<u64> {
@@ -1974,6 +507,22 @@ fn count_cached_xhtml_blocks(path: &Path, translator: &Translator) -> Result<usi
     Ok(count)
 }
 
+enum XhtmlPart {
+    Event(Event<'static>),
+    EmptyBlock {
+        start: BytesStart<'static>,
+        end_name: Vec<u8>,
+        inner: Vec<Event<'static>>,
+    },
+    TranslatableBlock {
+        start: BytesStart<'static>,
+        end_name: Vec<u8>,
+        inner: Vec<Event<'static>>,
+        inline_map: InlineMap,
+        translation_index: usize,
+    },
+}
+
 fn translate_xhtml_file(
     path: &Path,
     translator: &mut Translator,
@@ -1986,6 +535,8 @@ fn translate_xhtml_file(
     let mut writer = Writer::new(Vec::new());
     let mut buf = Vec::new();
     let mut blocks = 0usize;
+    let mut parts = Vec::new();
+    let mut sources = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -1995,68 +546,102 @@ fn translate_xhtml_file(
                 let inner = collect_element_inner(&mut reader, &end_name)?;
                 let (source_text, inline_map) = encode_inline(&inner)?;
                 if source_text.trim().is_empty() {
-                    if mode == Mode::Write {
+                    parts.push(XhtmlPart::EmptyBlock {
+                        start,
+                        end_name,
+                        inner,
+                    });
+                } else {
+                    let translation_index = sources.len();
+                    sources.push(source_text);
+                    parts.push(XhtmlPart::TranslatableBlock {
+                        start,
+                        end_name,
+                        inner,
+                        inline_map,
+                        translation_index,
+                    });
+                }
+            }
+            Event::Eof => break,
+            event => {
+                parts.push(XhtmlPart::Event(event.into_owned()));
+            }
+        }
+        buf.clear();
+    }
+
+    let translations = translator.translate_many(&sources, progress.as_deref_mut())?;
+    for part in parts {
+        match part {
+            XhtmlPart::Event(event) => {
+                if mode == Mode::Write {
+                    writer.write_event(event)?;
+                }
+            }
+            XhtmlPart::EmptyBlock {
+                start,
+                end_name,
+                inner,
+            } => {
+                if mode == Mode::Write {
+                    writer.write_event(Event::Start(start))?;
+                    write_events(&mut writer, &inner)?;
+                    writer.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
+                        &end_name,
+                    ))))?;
+                }
+            }
+            XhtmlPart::TranslatableBlock {
+                start,
+                end_name,
+                inner,
+                inline_map,
+                translation_index,
+            } => match &translations[translation_index] {
+                Translation::Translated {
+                    text: translated,
+                    from_cache,
+                } => {
+                    if !from_cache && translator.dry_run {
+                        if let Some(progress) = progress.as_mut() {
+                            progress.inc_model_block();
+                        }
+                    }
+                    if mode == Mode::Stdout {
+                        blocks += 1;
+                        println!("{}", translated.trim());
+                        println!();
+                    } else {
+                        let (restored, used_translation) =
+                            restore_inline_or_original(translated, &inline_map, &inner);
+                        if used_translation || translator.dry_run {
+                            blocks += 1;
+                        }
+                        writer.write_event(Event::Start(start))?;
+                        write_events(&mut writer, &restored)?;
+                        writer.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
+                            &end_name,
+                        ))))?;
+                    }
+                }
+                Translation::Original => {
+                    if let Some(progress) = progress.as_mut() {
+                        progress.inc_passthrough_block();
+                    }
+                    if mode == Mode::Stdout {
+                        println!("{}", sources[translation_index].trim());
+                        println!();
+                    } else {
                         writer.write_event(Event::Start(start))?;
                         write_events(&mut writer, &inner)?;
                         writer.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
                             &end_name,
                         ))))?;
                     }
-                } else {
-                    let translation = translator.translate(&source_text)?;
-                    match translation {
-                        Translation::Translated {
-                            text: translated,
-                            from_cache,
-                        } => {
-                            if !from_cache {
-                                if let Some(progress) = progress.as_mut() {
-                                    progress.inc_model_block();
-                                }
-                            }
-                            if mode == Mode::Stdout {
-                                blocks += 1;
-                                println!("{}", translated.trim());
-                                println!();
-                            } else {
-                                let (restored, used_translation) =
-                                    restore_inline_or_original(&translated, &inline_map, &inner);
-                                if used_translation || translator.dry_run {
-                                    blocks += 1;
-                                }
-                                writer.write_event(Event::Start(start))?;
-                                write_events(&mut writer, &restored)?;
-                                writer.write_event(Event::End(BytesEnd::new(
-                                    String::from_utf8_lossy(&end_name),
-                                )))?;
-                            }
-                        }
-                        Translation::Original => {
-                            if let Some(progress) = progress.as_mut() {
-                                progress.inc_passthrough_block();
-                            }
-                            if mode == Mode::Stdout {
-                                println!("{}", source_text.trim());
-                                println!();
-                            } else {
-                                writer.write_event(Event::Start(start))?;
-                                write_events(&mut writer, &inner)?;
-                                writer.write_event(Event::End(BytesEnd::new(
-                                    String::from_utf8_lossy(&end_name),
-                                )))?;
-                            }
-                        }
-                    }
                 }
-            }
-            Event::Eof => break,
-            event => {
-                if mode == Mode::Write {
-                    writer.write_event(event.into_owned())?;
-                }
-            }
+            },
         }
-        buf.clear();
     }
 
     if mode == Mode::Write {
@@ -2272,7 +857,7 @@ fn write_events<W: Write>(writer: &mut Writer<W>, events: &[Event<'static>]) -> 
     Ok(())
 }
 
-fn collapse_ws(s: &str) -> String {
+pub(crate) fn collapse_ws(s: &str) -> String {
     let mut out = String::new();
     let mut last_space = false;
     for ch in s.chars() {
@@ -2289,7 +874,8 @@ fn collapse_ws(s: &str) -> String {
     out.trim().to_string()
 }
 
-struct Translator {
+#[derive(Clone)]
+struct TranslationBackend {
     provider: Provider,
     model: String,
     ollama_host: String,
@@ -2300,17 +886,110 @@ struct Translator {
     temperature: f32,
     num_ctx: u32,
     retries: u32,
+    max_chars_per_request: usize,
     style: String,
     glossary: Vec<GlossaryEntry>,
+    client: Client,
+    api_usage: Arc<Mutex<ApiUsage>>,
+    adaptive_concurrency: Arc<AdaptiveConcurrency>,
+}
+
+struct AdaptiveConcurrency {
+    max: usize,
+    current: AtomicUsize,
+    success_streak: AtomicUsize,
+}
+
+impl AdaptiveConcurrency {
+    fn new(max: usize) -> Self {
+        let max = max.max(1);
+        Self {
+            max,
+            current: AtomicUsize::new(max),
+            success_streak: AtomicUsize::new(0),
+        }
+    }
+
+    fn current(&self) -> usize {
+        self.current.load(Ordering::Relaxed).clamp(1, self.max)
+    }
+
+    fn reduce(&self, provider: &str, err: &reqwest::Error) {
+        let mut current = self.current();
+        while current > 1 {
+            let next = current - 1;
+            match self
+                .current
+                .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    self.success_streak.store(0, Ordering::Relaxed);
+                    eprintln!(
+                        "warning: reducing provider concurrency {current}->{next} after {provider} retryable error: {err}"
+                    );
+                    return;
+                }
+                Err(actual) => current = actual.clamp(1, self.max),
+            }
+        }
+    }
+
+    fn record_success(&self, provider: &str) {
+        let streak = self.success_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        if streak < ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD {
+            return;
+        }
+        let mut current = self.current();
+        while current < self.max {
+            let next = current + 1;
+            match self
+                .current
+                .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    self.success_streak.store(0, Ordering::Relaxed);
+                    eprintln!(
+                        "warning: increasing provider concurrency {current}->{next} after {streak} successful {provider} request(s)"
+                    );
+                    return;
+                }
+                Err(actual) => current = actual.clamp(1, self.max),
+            }
+        }
+        self.success_streak.store(0, Ordering::Relaxed);
+    }
+}
+
+struct Translator {
+    backend: TranslationBackend,
+    fallback_backend: Option<TranslationBackend>,
     cache: CacheStore,
     partial_from_cache: bool,
     dry_run: bool,
-    client: Client,
+    concurrency: usize,
+    fallback_count: usize,
 }
 
 enum Translation {
     Translated { text: String, from_cache: bool },
     Original,
+}
+
+#[derive(Clone)]
+struct TranslationJob {
+    index: usize,
+    source: String,
+    glossary_subset: Vec<GlossaryEntry>,
+    key: String,
+}
+
+struct TranslationJobResult {
+    index: usize,
+    key: String,
+    translated: String,
+    provider: Provider,
+    model: String,
+    fallback_used: bool,
 }
 
 impl Translator {
@@ -2319,96 +998,505 @@ impl Translator {
             .timeout(Duration::from_secs(args.timeout_secs))
             .build()
             .context("failed to create HTTP client")?;
-        let model = args.model.unwrap_or_else(|| match args.provider {
-            Provider::Ollama => DEFAULT_MODEL.to_string(),
-            Provider::Openai => DEFAULT_OPENAI_MODEL.to_string(),
-            Provider::Claude => DEFAULT_CLAUDE_MODEL.to_string(),
-        });
-        let openai_api_key = read_api_key(
-            args.provider,
-            Provider::Openai,
-            args.openai_api_key,
-            "OPENAI_API_KEY",
-            args.prompt_api_key,
-        )?;
-        let anthropic_api_key = read_api_key(
-            args.provider,
-            Provider::Claude,
-            args.anthropic_api_key,
-            "ANTHROPIC_API_KEY",
-            args.prompt_api_key,
-        )?;
-        let glossary = match args.glossary {
+        let provider = args.provider;
+        let fallback_provider = args.fallback_provider;
+        let model = args
+            .model
+            .clone()
+            .unwrap_or_else(|| default_model_for_provider(provider).to_string());
+        let openai_api_key = if args.usage_only {
+            None
+        } else {
+            read_api_key(
+                provider,
+                Provider::Openai,
+                args.openai_api_key.clone(),
+                "OPENAI_API_KEY",
+                args.prompt_api_key,
+            )?
+        };
+        let anthropic_api_key = if args.usage_only {
+            None
+        } else {
+            read_api_key(
+                provider,
+                Provider::Claude,
+                args.anthropic_api_key.clone(),
+                "ANTHROPIC_API_KEY",
+                args.prompt_api_key,
+            )?
+        };
+        let glossary = match &args.glossary {
             Some(path) => load_glossary(&path)?,
             None => Vec::new(),
         };
+        let concurrency = args.concurrency.max(1);
+        let api_usage = Arc::new(Mutex::new(ApiUsage::default()));
+        let adaptive_concurrency = Arc::new(AdaptiveConcurrency::new(concurrency));
+        let ollama_host = args.ollama_host.trim_end_matches('/').to_string();
+        let openai_base_url = args.openai_base_url.trim_end_matches('/').to_string();
+        let claude_base_url = args.claude_base_url.trim_end_matches('/').to_string();
+        let fallback_backend = if let Some(provider) = fallback_provider {
+            let fallback_model = args
+                .fallback_model
+                .clone()
+                .unwrap_or_else(|| default_model_for_provider(provider).to_string());
+            let fallback_openai_api_key = if args.usage_only {
+                None
+            } else {
+                read_api_key(
+                    provider,
+                    Provider::Openai,
+                    args.openai_api_key.clone(),
+                    "OPENAI_API_KEY",
+                    args.prompt_api_key,
+                )?
+            };
+            let fallback_anthropic_api_key = if args.usage_only {
+                None
+            } else {
+                read_api_key(
+                    provider,
+                    Provider::Claude,
+                    args.anthropic_api_key.clone(),
+                    "ANTHROPIC_API_KEY",
+                    args.prompt_api_key,
+                )?
+            };
+            Some(TranslationBackend {
+                provider,
+                model: fallback_model,
+                ollama_host: ollama_host.clone(),
+                openai_base_url: openai_base_url.clone(),
+                claude_base_url: claude_base_url.clone(),
+                openai_api_key: fallback_openai_api_key,
+                anthropic_api_key: fallback_anthropic_api_key,
+                temperature: args.temperature,
+                num_ctx: args.num_ctx,
+                retries: args.retries,
+                max_chars_per_request: args.max_chars_per_request,
+                style: args.style.clone(),
+                glossary: glossary.clone(),
+                client: client.clone(),
+                api_usage: api_usage.clone(),
+                adaptive_concurrency: adaptive_concurrency.clone(),
+            })
+        } else {
+            None
+        };
         Ok(Self {
-            provider: args.provider,
-            model,
-            ollama_host: args.ollama_host.trim_end_matches('/').to_string(),
-            openai_base_url: args.openai_base_url.trim_end_matches('/').to_string(),
-            claude_base_url: args.claude_base_url.trim_end_matches('/').to_string(),
-            openai_api_key,
-            anthropic_api_key,
-            temperature: args.temperature,
-            num_ctx: args.num_ctx,
-            retries: args.retries,
-            style: args.style,
-            glossary,
+            backend: TranslationBackend {
+                provider,
+                model,
+                ollama_host,
+                openai_base_url,
+                claude_base_url,
+                openai_api_key,
+                anthropic_api_key,
+                temperature: args.temperature,
+                num_ctx: args.num_ctx,
+                retries: args.retries,
+                max_chars_per_request: args.max_chars_per_request,
+                style: args.style,
+                glossary,
+                client,
+                api_usage,
+                adaptive_concurrency,
+            },
+            fallback_backend,
             cache,
             partial_from_cache: args.partial_from_cache,
             dry_run: args.dry_run,
-            client,
+            concurrency,
+            fallback_count: 0,
         })
     }
 
-    fn translate(&mut self, source: &str) -> Result<Translation> {
+    fn translate_many(
+        &mut self,
+        sources: &[String],
+        progress: Option<&mut ProgressReporter>,
+    ) -> Result<Vec<Translation>> {
+        let mut translations = Vec::with_capacity(sources.len());
+        let mut jobs = Vec::new();
+        for (index, source) in sources.iter().enumerate() {
+            translations.push(None);
+            let translation = self.prepare_translation(index, source, &mut jobs)?;
+            if let Some(translation) = translation {
+                translations[index] = Some(translation);
+            }
+        }
+
+        let job_count = jobs.len();
+        let backend = self.backend.clone();
+        let fallback_backend = self.fallback_backend.clone();
+        run_translation_jobs(
+            backend,
+            fallback_backend,
+            self.concurrency,
+            jobs,
+            progress,
+            |result| {
+                if result.fallback_used {
+                    self.fallback_count += 1;
+                }
+                let record = CacheRecord {
+                    key: result.key,
+                    translated: result.translated.clone(),
+                    provider: result.provider.to_string(),
+                    model: result.model,
+                    at: chrono::Utc::now().to_rfc3339(),
+                };
+                self.cache.insert(record)?;
+                translations[result.index] = Some(Translation::Translated {
+                    text: result.translated,
+                    from_cache: false,
+                });
+                Ok(())
+            },
+        )?;
+
+        translations
+            .into_iter()
+            .enumerate()
+            .map(|(idx, translation)| {
+                translation.with_context(|| {
+                    format!(
+                        "internal error: missing translation result {}/{}",
+                        idx + 1,
+                        sources.len()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .with_context(|| format!("failed to translate {job_count} uncached block(s)"))
+    }
+
+    fn prepare_translation(
+        &mut self,
+        index: usize,
+        source: &str,
+        jobs: &mut Vec<TranslationJob>,
+    ) -> Result<Option<Translation>> {
         if self.dry_run {
-            return Ok(Translation::Translated {
+            return Ok(Some(Translation::Translated {
                 text: source.to_string(),
                 from_cache: false,
-            });
+            }));
         }
-        let glossary_subset = self.glossary_subset(source);
+        let glossary_subset = self.backend.glossary_subset(source);
         let key = self.cache_key(source, &glossary_subset);
         if let Some(translated) = self.cache.get(&key) {
-            return Ok(Translation::Translated {
-                text: translated,
-                from_cache: true,
-            });
+            match validate_cached_translation(source, &translated) {
+                Ok(()) => {
+                    return Ok(Some(Translation::Translated {
+                        text: translated,
+                        from_cache: true,
+                    }));
+                }
+                Err(err) => {
+                    eprintln!("warning: ignoring invalid cached translation for key {key}: {err}");
+                    self.cache.invalidate(&key);
+                }
+            }
         }
         if self.partial_from_cache {
-            return Ok(Translation::Original);
+            return Ok(Some(Translation::Original));
         }
-        let prompt = user_prompt(source, &glossary_subset);
-        match self.provider {
-            Provider::Ollama => self.translate_ollama(&prompt),
-            Provider::Openai => self.translate_openai(&prompt),
-            Provider::Claude => self.translate_claude(&prompt),
-        }
-        .and_then(|translated| {
-            let record = CacheRecord {
-                key,
-                translated: translated.clone(),
-                provider: self.provider.to_string(),
-                model: self.model.clone(),
-                at: chrono::Utc::now().to_rfc3339(),
-            };
-            self.cache.insert(record)?;
-            Ok(Translation::Translated {
-                text: translated,
-                from_cache: false,
-            })
-        })
+        jobs.push(TranslationJob {
+            index,
+            source: source.to_string(),
+            glossary_subset,
+            key,
+        });
+        Ok(None)
     }
 
     fn has_cached_translation(&self, source: &str) -> bool {
         if self.dry_run {
             return false;
         }
-        let glossary_subset = self.glossary_subset(source);
+        let glossary_subset = self.backend.glossary_subset(source);
         let key = self.cache_key(source, &glossary_subset);
-        self.cache.contains_key(&key)
+        self.cache
+            .peek(&key)
+            .is_some_and(|translated| validate_cached_translation(source, translated).is_ok())
+    }
+
+    fn cache_key(&self, source: &str, glossary_subset: &[GlossaryEntry]) -> String {
+        self.backend.cache_key(source, glossary_subset)
+    }
+
+    fn manifest_params(&self) -> ManifestParams {
+        ManifestParams {
+            provider: self.backend.provider.to_string(),
+            model: self.backend.model.clone(),
+            prompt_version: "v1".to_string(),
+            style_id: self.backend.style.clone(),
+            glossary_sha: glossary_sha(&self.backend.glossary),
+        }
+    }
+
+    fn api_usage_summary(&self) -> Option<String> {
+        self.backend.api_usage_summary()
+    }
+}
+
+fn run_translation_job_with_fallback(
+    backend: &TranslationBackend,
+    fallback_backend: Option<&TranslationBackend>,
+    job: TranslationJob,
+) -> Result<TranslationJobResult> {
+    let primary_job = job.clone();
+    match backend.run_translation_job(primary_job) {
+        Ok(result) => Ok(result),
+        Err(err) if is_refusal_validation_error(&err) => {
+            let Some(fallback_backend) = fallback_backend else {
+                return Err(err);
+            };
+            eprintln!(
+                "warning: {} returned a refusal/explanation after validation retries; falling back to {} ({})",
+                backend.provider, fallback_backend.provider, fallback_backend.model
+            );
+            let mut result = fallback_backend.run_translation_job(job).with_context(|| {
+                format!(
+                    "fallback translation failed after {} refusal/explanation",
+                    backend.provider
+                )
+            })?;
+            result.fallback_used = true;
+            Ok(result)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_refusal_validation_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("provider returned an explanation or refusal")
+    })
+}
+
+fn run_translation_jobs<F>(
+    backend: TranslationBackend,
+    fallback_backend: Option<TranslationBackend>,
+    concurrency_limit: usize,
+    jobs: Vec<TranslationJob>,
+    mut progress: Option<&mut ProgressReporter>,
+    mut on_result: F,
+) -> Result<()>
+where
+    F: FnMut(TranslationJobResult) -> Result<()>,
+{
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    let concurrency = concurrency_limit.max(1).min(jobs.len());
+    if let Some(progress) = progress.as_mut() {
+        progress.set_provider_batch(0, jobs.len(), backend.current_concurrency());
+    }
+    if concurrency == 1 {
+        let job_count = jobs.len();
+        let mut completed = 0usize;
+        for job in jobs {
+            let result =
+                run_translation_job_with_fallback(&backend, fallback_backend.as_ref(), job)?;
+            on_result(result)?;
+            completed += 1;
+            if let Some(progress) = progress.as_mut() {
+                progress.complete_provider_block(
+                    completed,
+                    job_count,
+                    backend.current_concurrency(),
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let (result_tx, result_rx) = mpsc::channel::<Result<TranslationJobResult>>();
+    let job_count = jobs.len();
+    thread::scope(|scope| {
+        let mut worker_txs = Vec::with_capacity(concurrency);
+        for _ in 0..concurrency {
+            let (worker_tx, worker_rx) = mpsc::channel::<TranslationJob>();
+            worker_txs.push(worker_tx);
+            let result_tx = result_tx.clone();
+            let backend = backend.clone();
+            let fallback_backend = fallback_backend.clone();
+            scope.spawn(move || {
+                while let Ok(job) = worker_rx.recv() {
+                    let result =
+                        run_translation_job_with_fallback(&backend, fallback_backend.as_ref(), job);
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(result_tx);
+
+        let mut queued = VecDeque::from(jobs);
+        let mut next_worker = 0usize;
+        let mut in_flight = 0usize;
+        let mut completed = 0usize;
+
+        dispatch_translation_jobs(
+            &worker_txs,
+            &mut queued,
+            &mut next_worker,
+            &mut in_flight,
+            backend.current_concurrency(),
+        )?;
+
+        while completed < job_count {
+            let received = result_rx
+                .recv()
+                .context("translation worker exited before sending all results")?;
+            in_flight = in_flight.saturating_sub(1);
+            on_result(received?)?;
+            completed += 1;
+            if let Some(progress) = progress.as_mut() {
+                progress.complete_provider_block(
+                    completed,
+                    job_count,
+                    backend.current_concurrency(),
+                );
+            }
+            dispatch_translation_jobs(
+                &worker_txs,
+                &mut queued,
+                &mut next_worker,
+                &mut in_flight,
+                backend.current_concurrency(),
+            )?;
+        }
+        drop(worker_txs);
+        Ok(())
+    })
+}
+
+fn dispatch_translation_jobs(
+    worker_txs: &[mpsc::Sender<TranslationJob>],
+    queued: &mut VecDeque<TranslationJob>,
+    next_worker: &mut usize,
+    in_flight: &mut usize,
+    current_limit: usize,
+) -> Result<()> {
+    let current_limit = current_limit.max(1);
+    while *in_flight < current_limit {
+        let Some(job) = queued.pop_front() else {
+            break;
+        };
+        let worker_index = *next_worker % worker_txs.len();
+        worker_txs[worker_index]
+            .send(job)
+            .context("failed to send translation job to worker")?;
+        *next_worker += 1;
+        *in_flight += 1;
+    }
+    Ok(())
+}
+
+impl TranslationBackend {
+    fn current_concurrency(&self) -> usize {
+        self.adaptive_concurrency.current()
+    }
+
+    fn run_translation_job(&self, job: TranslationJob) -> Result<TranslationJobResult> {
+        let translated = self.translate_uncached(&job.source, &job.glossary_subset)?;
+        Ok(TranslationJobResult {
+            index: job.index,
+            key: job.key,
+            translated,
+            provider: self.provider,
+            model: self.model.clone(),
+            fallback_used: false,
+        })
+    }
+
+    fn translate_uncached(
+        &self,
+        source: &str,
+        glossary_subset: &[GlossaryEntry],
+    ) -> Result<String> {
+        let chunks = split_translation_chunks(source, self.max_chars_per_request);
+        if chunks.len() == 1 {
+            return self.translate_with_validation(
+                source,
+                user_prompt(source, glossary_subset),
+                glossary_subset,
+            );
+        }
+        eprintln!(
+            "warning: splitting long translation block into {} requests ({} chars, max {} chars per request)",
+            chunks.len(),
+            source.chars().count(),
+            self.max_chars_per_request
+        );
+        let mut translations = Vec::with_capacity(chunks.len());
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let chunk_glossary = self.glossary_subset(chunk);
+            let translated = self
+                .translate_with_validation(
+                    chunk,
+                    user_prompt(chunk, &chunk_glossary),
+                    &chunk_glossary,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to translate long block chunk {}/{}",
+                        idx + 1,
+                        chunks.len()
+                    )
+                })?;
+            translations.push(translated);
+        }
+        let translated = translations
+            .into_iter()
+            .map(|part| part.trim().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        validate_translation_response(source, &translated)?;
+        Ok(translated)
+    }
+
+    fn translate_with_validation(
+        &self,
+        source: &str,
+        initial_prompt: String,
+        glossary_subset: &[GlossaryEntry],
+    ) -> Result<String> {
+        let mut prompt = initial_prompt;
+        let attempts = self.retries.saturating_add(1).max(1);
+        for attempt in 1..=attempts {
+            let translated = match self.provider {
+                Provider::Ollama => self.translate_ollama(&prompt),
+                Provider::Openai => self.translate_openai(&prompt),
+                Provider::Claude => self.translate_claude(&prompt),
+            }?;
+            match validate_translation_response(source, &translated) {
+                Ok(()) => return Ok(translated),
+                Err(err) if attempt < attempts => {
+                    let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
+                    eprintln!(
+                        "warning: translation validation failed: {err}; retry {attempt}/{} in {wait_secs}s",
+                        self.retries
+                    );
+                    prompt =
+                        retry_user_prompt(source, &glossary_subset, &translated, &err.to_string());
+                    thread::sleep(Duration::from_secs(wait_secs));
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("translation validation failed after {attempt} attempt(s)")
+                    });
+                }
+            }
+        }
+        bail!("translation validation failed")
     }
 
     fn cache_key(&self, source: &str, glossary_subset: &[GlossaryEntry]) -> String {
@@ -2419,16 +1507,6 @@ impl Translator {
             source,
             glossary_subset,
         )
-    }
-
-    fn manifest_params(&self) -> ManifestParams {
-        ManifestParams {
-            provider: self.provider.to_string(),
-            model: self.model.clone(),
-            prompt_version: "v1".to_string(),
-            style_id: self.style.clone(),
-            glossary_sha: glossary_sha(&self.glossary),
-        }
     }
 
     fn glossary_subset(&self, source: &str) -> Vec<GlossaryEntry> {
@@ -2461,6 +1539,7 @@ impl Translator {
                 .post(format!("{}/api/chat", self.ollama_host))
                 .json(&payload)
         })?;
+        self.record_usage(usage_from_ollama_response(&response));
         Ok(response.message.content.trim().to_string())
     }
 
@@ -2479,6 +1558,7 @@ impl Translator {
                 .bearer_auth(api_key)
                 .json(&payload)
         })?;
+        self.record_usage(usage_from_openai_value(&value));
         extract_openai_text(&value).context("OpenAI response did not contain output text")
     }
 
@@ -2503,6 +1583,7 @@ impl Translator {
                 .header("content-type", "application/json")
                 .json(&payload)
         })?;
+        self.record_usage(usage_from_claude_response(&response));
         let text = response
             .content
             .into_iter()
@@ -2528,11 +1609,16 @@ impl Translator {
                 .and_then(|response| response.error_for_status())
                 .and_then(|response| response.json::<T>());
             match result {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    self.adaptive_concurrency.record_success(provider);
+                    return Ok(value);
+                }
                 Err(err) if attempt < attempts && should_retry_request(&err) => {
+                    self.adaptive_concurrency.reduce(provider, &err);
                     let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
                     eprintln!(
-                        "warning: {provider} request failed on attempt {attempt}/{attempts}: {err}; retrying in {wait_secs}s"
+                        "warning: {provider} request failed: {err}; retry {attempt}/{} in {wait_secs}s",
+                        self.retries
                     );
                     thread::sleep(Duration::from_secs(wait_secs));
                 }
@@ -2545,6 +1631,20 @@ impl Translator {
         }
         bail!("failed to call {provider}")
     }
+
+    fn record_usage(&self, usage: ApiUsage) {
+        if usage.is_empty() {
+            return;
+        }
+        if let Ok(mut total) = self.api_usage.lock() {
+            total.add(usage);
+        }
+    }
+
+    fn api_usage_summary(&self) -> Option<String> {
+        let usage = self.api_usage.lock().ok()?;
+        (!usage.is_empty()).then(|| usage.summary())
+    }
 }
 
 fn should_retry_request(err: &reqwest::Error) -> bool {
@@ -2554,6 +1654,237 @@ fn should_retry_request(err: &reqwest::Error) -> bool {
     err.status()
         .map(|status| status.as_u16() == 429 || status.is_server_error())
         .unwrap_or(false)
+}
+
+fn split_translation_chunks(source: &str, max_chars: usize) -> Vec<String> {
+    let mut rest = source.trim();
+    if rest.is_empty() || max_chars == 0 || rest.chars().count() <= max_chars {
+        return vec![rest.to_string()];
+    }
+    let mut chunks = Vec::new();
+    while rest.chars().count() > max_chars {
+        let cut = find_translation_chunk_cut(rest, max_chars).unwrap_or(rest.len());
+        let (chunk, next) = rest.split_at(cut);
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            break;
+        }
+        chunks.push(chunk.to_string());
+        rest = next.trim_start();
+    }
+    if !rest.trim().is_empty() {
+        chunks.push(rest.trim().to_string());
+    }
+    chunks
+}
+
+fn find_translation_chunk_cut(source: &str, max_chars: usize) -> Option<usize> {
+    let mut in_placeholder = false;
+    let mut last_sentence_boundary = None;
+    let mut last_space_boundary = None;
+    let min_boundary_chars = (max_chars / 3).max(1);
+    let mut count = 0usize;
+
+    for (idx, ch) in source.char_indices() {
+        count += 1;
+        let next_idx = idx + ch.len_utf8();
+        match ch {
+            '⟦' => in_placeholder = true,
+            '⟧' => in_placeholder = false,
+            _ => {}
+        }
+        if !in_placeholder {
+            if count >= min_boundary_chars {
+                if is_sentence_boundary(ch) {
+                    last_sentence_boundary = Some(next_idx);
+                } else if ch.is_whitespace() {
+                    last_space_boundary = Some(next_idx);
+                }
+            }
+        }
+        if count >= max_chars && !in_placeholder {
+            return last_sentence_boundary
+                .or(last_space_boundary)
+                .filter(|cut| *cut > 0)
+                .or(Some(next_idx));
+        }
+    }
+    None
+}
+
+fn is_sentence_boundary(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | '!' | '?' | ';' | ':' | '。' | '！' | '？' | '；' | '：'
+    )
+}
+
+fn validate_translation_response(source: &str, translated: &str) -> Result<()> {
+    let source = source.trim();
+    let translated = translated.trim();
+    if translated.is_empty() {
+        bail!("translation validation failed: provider returned an empty translation");
+    }
+    if contains_prompt_tag(translated) {
+        bail!("translation validation failed: provider returned prompt wrapper tags");
+    }
+    validate_placeholder_tokens(source, translated)?;
+    if is_meaningful_english(source)
+        && normalize_for_comparison(source) == normalize_for_comparison(translated)
+    {
+        bail!("translation validation failed: provider returned the source text unchanged");
+    }
+    if looks_like_refusal_or_explanation(translated) {
+        bail!(
+            "translation validation failed: provider returned an explanation or refusal instead of a translation"
+        );
+    }
+    if likely_untranslated_english(source, translated) {
+        bail!(
+            "translation validation failed: provider response does not appear to contain Japanese text"
+        );
+    }
+    if likely_truncated_translation(source, translated) {
+        bail!("translation validation failed: provider response appears to be truncated");
+    }
+    Ok(())
+}
+
+fn validate_cached_translation(source: &str, translated: &str) -> Result<()> {
+    validate_translation_response(source, translated)
+        .context("cached translation no longer passes validation")
+}
+
+fn contains_prompt_tag(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["<source", "</source>", "<glossary", "</glossary>"]
+        .iter()
+        .any(|tag| lower.contains(tag))
+}
+
+fn validate_placeholder_tokens(source: &str, translated: &str) -> Result<()> {
+    let source_tokens = placeholder_signature(source);
+    if source_tokens.is_empty() {
+        return Ok(());
+    }
+    let translated_tokens = placeholder_signature(translated);
+    if source_tokens != translated_tokens {
+        bail!("translation validation failed: provider changed or dropped inline placeholders");
+    }
+    Ok(())
+}
+
+fn placeholder_signature(text: &str) -> Vec<String> {
+    let mut signature = tokenize_placeholders(text)
+        .into_iter()
+        .filter_map(|token| match token {
+            Token::Open(id) => Some(format!("E{id}")),
+            Token::Close(id) => Some(format!("/E{id}")),
+            Token::SelfClose(id) => Some(format!("S{id}")),
+            Token::Text(_) => None,
+        })
+        .collect::<Vec<_>>();
+    signature.sort_unstable();
+    signature
+}
+
+fn normalize_for_comparison(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_meaningful_english(text: &str) -> bool {
+    ascii_letter_count(text) >= 6
+}
+
+fn likely_untranslated_english(source: &str, translated: &str) -> bool {
+    if japanese_char_count(translated) > 0 {
+        return false;
+    }
+    let source_words = ascii_word_count(source);
+    let translated_words = ascii_word_count(translated);
+    source_words >= 3 && translated_words >= 3
+        || ascii_letter_count(source) >= 24 && ascii_letter_count(translated) >= 12
+}
+
+fn ascii_word_count(text: &str) -> usize {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|part| part.len() >= 2)
+        .count()
+}
+
+fn ascii_letter_count(text: &str) -> usize {
+    text.chars().filter(|ch| ch.is_ascii_alphabetic()).count()
+}
+
+fn japanese_char_count(text: &str) -> usize {
+    text.chars()
+        .filter(|ch| {
+            matches!(
+                *ch,
+                '\u{3040}'..='\u{309f}'
+                    | '\u{30a0}'..='\u{30ff}'
+                    | '\u{3400}'..='\u{9fff}'
+                    | '\u{f900}'..='\u{faff}'
+            )
+        })
+        .count()
+}
+
+fn looks_like_refusal_or_explanation(text: &str) -> bool {
+    let lower = text.trim_start().to_lowercase();
+    [
+        "as an ai",
+        "i am sorry",
+        "i'm sorry",
+        "i cannot",
+        "i can't",
+        "cannot translate",
+        "can't translate",
+        "translation:",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+        || ["申し訳", "翻訳できません", "翻訳不能"]
+            .iter()
+            .any(|prefix| text.trim_start().starts_with(prefix))
+}
+
+fn likely_truncated_translation(source: &str, translated: &str) -> bool {
+    let source_letters = ascii_letter_count(source);
+    let source_words = ascii_word_count(source);
+    let translated_japanese = japanese_char_count(translated);
+    if translated_japanese == 0 || source_words < 20 {
+        return false;
+    }
+    if ends_with_sentence_terminal(source) && !ends_with_sentence_terminal(translated) {
+        return true;
+    }
+    source_letters >= 240 && translated_japanese * 6 < source_letters
+}
+
+fn ends_with_sentence_terminal(text: &str) -> bool {
+    text.trim_end().chars().last().is_some_and(|ch| {
+        matches!(
+            ch,
+            '.' | '!'
+                | '?'
+                | '。'
+                | '！'
+                | '？'
+                | '"'
+                | '\''
+                | '”'
+                | '’'
+                | '」'
+                | '』'
+                | ')'
+                | '）'
+                | '⟧'
+        )
+    })
 }
 
 fn read_api_key(
@@ -2608,34 +1939,6 @@ fn extract_openai_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn load_glossary(path: &Path) -> Result<Vec<GlossaryEntry>> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read glossary {}", path.display()))?;
-    let glossary: GlossaryFile = serde_json::from_str(&text)
-        .with_context(|| format!("failed to parse glossary {}", path.display()))?;
-    Ok(glossary.entries)
-}
-
-fn read_cache_entries(path: &Path) -> Result<HashMap<String, String>> {
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let file =
-        File::open(path).with_context(|| format!("failed to open cache {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut entries = HashMap::new();
-    for (line_no, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed to read cache line {}", line_no + 1))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let record: CacheRecord = serde_json::from_str(&line)
-            .with_context(|| format!("failed to parse cache line {}", line_no + 1))?;
-        entries.insert(record.key, record.translated);
-    }
-    Ok(entries)
-}
-
 fn cache_key(
     provider: Provider,
     model: &str,
@@ -2662,197 +1965,6 @@ fn cache_key(
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn user_prompt(source: &str, glossary_subset: &[GlossaryEntry]) -> String {
-    let mut prompt = String::new();
-    if !glossary_subset.is_empty() {
-        prompt.push_str("<glossary>\n");
-        for entry in glossary_subset {
-            prompt.push_str("- ");
-            prompt.push_str(entry.src.trim());
-            prompt.push_str(" => ");
-            prompt.push_str(entry.dst.trim());
-            if let Some(kind) = entry.kind.as_deref().filter(|kind| !kind.trim().is_empty()) {
-                prompt.push_str(" (");
-                prompt.push_str(kind.trim());
-                prompt.push(')');
-            }
-            prompt.push('\n');
-        }
-        prompt.push_str("</glossary>\n\n");
-    }
-    prompt.push_str("<source>\n");
-    prompt.push_str(source);
-    prompt.push_str("\n</source>");
-    prompt
-}
-
-fn system_prompt(style: &str) -> String {
-    format!(
-        "あなたは英日翻訳の専門家です。出版物として通用する自然で読みやすい日本語に翻訳してください。\n\n\
-【絶対遵守ルール】\n\
-1. 入力中の ⟦…⟧ で囲まれたマーカは、形を一切変えずに訳文に含めてください。\n\
-2. マーカの順序は日本語として自然になるように入れ替えて構いませんが、原文に現れた全てのマーカを過不足なく残してください。\n\
-3. マーカの中身を改変・追加・削除しないでください。\n\
-4. 翻訳のみを出力し、説明・前置き・括弧書きの注釈を一切付けないでください。\n\
-5. <glossary> が与えられた場合、そこにある訳語を必ず使用し、表記を統一してください。\n\n{}",
-        style_prompt(style)
-    )
-}
-
-fn style_prompt(style: &str) -> &'static str {
-    match style {
-        "novel" => {
-            "【文体】\n- 地の文: である調。一文を長くしすぎず、句読点でリズムを整えてください。\n- 会話文: 話者の人物像にふさわしい口語。\n- 章タイトル: 簡潔。体言止めを基本にしてください。"
-        }
-        "novel-polite" => {
-            "【文体】\n- 地の文: です・ます調。児童にも読みやすい自然な日本語にしてください。\n- 漢字を控えめにし、会話文は話者に合わせてください。"
-        }
-        "tech" => {
-            "【文体】\n- 地の文: である調。事実を淡々と述べる調子。\n- 専門用語は一般に流通している訳語を優先してください。\n- コードや識別子は翻訳しないでください。"
-        }
-        "academic" => {
-            "【文体】\n- 地の文: 硬めのである調。訳語の厳密さを優先してください。\n- 章タイトルは名詞句を基本にしてください。"
-        }
-        "business" => {
-            "【文体】\n- 地の文: です・ます調。過度にくだけず、実務書として自然な表現にしてください。"
-        }
-        _ => {
-            "【文体】\n- 地の文: である調。原文の論旨と語り口を尊重しつつ、日本語として自然にしてください。\n- 章タイトル: 体言止めを基本にしてください。"
-        }
-    }
-}
-
-fn update_opf_metadata(opf_path: &Path, model: &str) -> Result<()> {
-    let source = fs::read(opf_path)?;
-    let mut reader = Reader::from_reader(Cursor::new(source));
-    reader.config_mut().trim_text(false);
-    let mut writer = Writer::new(Vec::new());
-    let mut buf = Vec::new();
-    let mut in_language = false;
-    let mut wrote_contributor = false;
-
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if local_name(e.name().as_ref()) == b"language" => {
-                in_language = true;
-                writer.write_event(Event::Start(e.into_owned()))?;
-            }
-            Event::Text(_) if in_language => {
-                writer.write_event(Event::Text(BytesText::new("ja").into_owned()))?;
-            }
-            Event::End(e) if local_name(e.name().as_ref()) == b"language" => {
-                in_language = false;
-                writer.write_event(Event::End(e.into_owned()))?;
-            }
-            Event::End(e) if local_name(e.name().as_ref()) == b"metadata" => {
-                if !wrote_contributor {
-                    let mut contributor = BytesStart::new("dc:contributor");
-                    contributor.push_attribute(("id", "epubicus-translator"));
-                    writer.write_event(Event::Start(contributor))?;
-                    writer.write_event(Event::Text(
-                        BytesText::new(&format!("epubicus (model: {model})")).into_owned(),
-                    ))?;
-                    writer.write_event(Event::End(BytesEnd::new("dc:contributor")))?;
-                    let mut role = BytesStart::new("meta");
-                    role.push_attribute(("refines", "#epubicus-translator"));
-                    role.push_attribute(("property", "role"));
-                    role.push_attribute(("scheme", "marc:relators"));
-                    writer.write_event(Event::Start(role))?;
-                    writer.write_event(Event::Text(BytesText::new("trl").into_owned()))?;
-                    writer.write_event(Event::End(BytesEnd::new("meta")))?;
-                    wrote_contributor = true;
-                }
-                writer.write_event(Event::End(e.into_owned()))?;
-            }
-            Event::Eof => break,
-            event => writer.write_event(event.into_owned())?,
-        }
-        buf.clear();
-    }
-    fs::write(opf_path, writer.into_inner())?;
-    Ok(())
-}
-
-fn pack_epub(root: &Path, output: &Path) -> Result<()> {
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file =
-        File::create(output).with_context(|| format!("failed to create {}", output.display()))?;
-    let mut zip = ZipWriter::new(BufWriter::new(file));
-    let stored: SimpleFileOptions =
-        FileOptions::default().compression_method(CompressionMethod::Stored);
-    let deflated: SimpleFileOptions =
-        FileOptions::default().compression_method(CompressionMethod::Deflated);
-
-    let mimetype = root.join("mimetype");
-    if mimetype.exists() {
-        zip.start_file("mimetype", stored)?;
-        zip.write_all(&fs::read(&mimetype)?)?;
-    }
-
-    let mut files = WalkDir::new(root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .collect::<Vec<_>>();
-    files.sort();
-
-    for path in files {
-        let rel = path
-            .strip_prefix(root)?
-            .to_string_lossy()
-            .replace('\\', "/");
-        if rel == "mimetype" {
-            continue;
-        }
-        zip.start_file(rel, deflated)?;
-        zip.write_all(&fs::read(path)?)?;
-    }
-    zip.finish()?;
-    Ok(())
-}
-
-fn normalize_epub_path(path: &str) -> PathBuf {
-    path.split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect()
-}
-
-fn local_name(name: &[u8]) -> &[u8] {
-    name.rsplit(|b| *b == b':').next().unwrap_or(name)
-}
-
-fn is_block_tag(name: QName<'_>) -> bool {
-    matches!(
-        local_name(name.as_ref()),
-        b"p" | b"h1"
-            | b"h2"
-            | b"h3"
-            | b"h4"
-            | b"h5"
-            | b"h6"
-            | b"li"
-            | b"blockquote"
-            | b"figcaption"
-            | b"aside"
-            | b"dt"
-            | b"dd"
-            | b"caption"
-            | b"td"
-            | b"th"
-            | b"summary"
-    )
-}
-
-fn is_never_translate_tag(name: &[u8]) -> bool {
-    matches!(
-        local_name(name),
-        b"code" | b"pre" | b"kbd" | b"samp" | b"var" | b"tt" | b"script" | b"style" | b"math"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2870,6 +1982,8 @@ mod tests {
         let common = CommonArgs {
             provider: Provider::Ollama,
             model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
             ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
             openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
@@ -2879,13 +1993,16 @@ mod tests {
             temperature: 0.3,
             num_ctx: 8192,
             timeout_secs: 900,
-            retries: 2,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
             glossary: None,
             cache_root: None,
             no_cache: true,
             clear_cache: false,
             keep_cache: false,
+            usage_only: false,
             partial_from_cache: false,
             dry_run: true,
         };
@@ -2894,7 +2011,7 @@ mod tests {
         let stats = translate_book(&book, 1..=2, &mut translator, Mode::Write, false)?;
         assert_eq!(stats.pages_translated, 2);
         assert_eq!(stats.blocks_translated, 3);
-        update_opf_metadata(&book.opf_path, &translator.model)?;
+        update_opf_metadata(&book.opf_path, &translator.backend.model)?;
         pack_epub(book.work_dir.path(), &output)?;
 
         let repacked = unpack_epub(&output)?;
@@ -2961,6 +2078,38 @@ mod tests {
     }
 
     #[test]
+    fn openai_usage_is_extracted_from_response() {
+        let value = serde_json::json!({
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "total_tokens": 165
+            }
+        });
+        let usage = usage_from_openai_value(&value);
+        assert_eq!(usage.requests, 1);
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 45);
+        assert_eq!(usage.total_tokens, 165);
+    }
+
+    #[test]
+    fn claude_usage_is_extracted_from_response() {
+        let response = ClaudeResponse {
+            content: Vec::new(),
+            usage: Some(ClaudeUsage {
+                input_tokens: Some(80),
+                output_tokens: Some(30),
+            }),
+        };
+        let usage = usage_from_claude_response(&response);
+        assert_eq!(usage.requests, 1);
+        assert_eq!(usage.input_tokens, 80);
+        assert_eq!(usage.output_tokens, 30);
+        assert_eq!(usage.total_tokens, 110);
+    }
+
+    #[test]
     fn glossary_subset_is_injected_into_prompt() {
         let entries = vec![
             GlossaryEntry {
@@ -2985,6 +2134,89 @@ mod tests {
         assert!(prompt.contains("Horizon => ホライゾン (system)"));
         assert!(!prompt.contains("Unused"));
         assert!(prompt.contains("<source>\nHorizon failed.\n</source>"));
+    }
+
+    #[test]
+    fn retry_prompt_keeps_source_and_adds_validation_context() {
+        let entries = vec![GlossaryEntry {
+            src: "Horizon".to_string(),
+            dst: "ホライゾン".to_string(),
+            kind: Some("system".to_string()),
+            note: None,
+        }];
+        let prompt = retry_user_prompt(
+            "Horizon failed.",
+            &entries,
+            "Horizon failed.",
+            "translation validation failed: provider returned the source text unchanged",
+        );
+        assert!(prompt.contains("Horizon => ホライゾン (system)"));
+        assert!(prompt.contains("<source>\nHorizon failed.\n</source>"));
+        assert!(prompt.contains("<retry_instruction>"));
+        assert!(prompt.contains("source text unchanged"));
+        assert!(prompt.contains("前回の応答:\nHorizon failed."));
+    }
+
+    #[test]
+    fn long_translation_chunks_split_on_sentence_boundaries() {
+        let source = "First sentence. Second sentence is a little longer. Third sentence.";
+        let chunks = split_translation_chunks(source, 35);
+        assert_eq!(
+            chunks,
+            vec![
+                "First sentence.",
+                "Second sentence is a little longer.",
+                "Third sentence."
+            ]
+        );
+    }
+
+    #[test]
+    fn long_translation_chunks_do_not_split_inside_placeholder() {
+        let source =
+            "Read ⟦E123456789⟧this very long linked phrase⟦/E123456789⟧. Continue after it.";
+        let chunks = split_translation_chunks(source, 20);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.matches('⟦').count() == chunk.matches('⟧').count())
+        );
+        assert_eq!(
+            placeholder_signature(source),
+            placeholder_signature(&chunks.join(" "))
+        );
+    }
+
+    #[test]
+    fn adaptive_concurrency_reduces_to_one() {
+        let adaptive = AdaptiveConcurrency::new(3);
+        assert_eq!(adaptive.current(), 3);
+        adaptive.current.store(2, Ordering::Relaxed);
+        assert_eq!(adaptive.current(), 2);
+        adaptive.current.store(1, Ordering::Relaxed);
+        assert_eq!(adaptive.current(), 1);
+        adaptive.current.store(0, Ordering::Relaxed);
+        assert_eq!(adaptive.current(), 1);
+    }
+
+    #[test]
+    fn adaptive_concurrency_recovers_after_success_streak() {
+        let adaptive = AdaptiveConcurrency::new(3);
+        adaptive.current.store(1, Ordering::Relaxed);
+        for _ in 0..(ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD - 1) {
+            adaptive.record_success("test");
+        }
+        assert_eq!(adaptive.current(), 1);
+        adaptive.record_success("test");
+        assert_eq!(adaptive.current(), 2);
+        for _ in 0..ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD {
+            adaptive.record_success("test");
+        }
+        assert_eq!(adaptive.current(), 3);
+        for _ in 0..ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD {
+            adaptive.record_success("test");
+        }
+        assert_eq!(adaptive.current(), 3);
     }
 
     #[test]
@@ -3019,7 +2251,78 @@ mod tests {
     }
 
     #[test]
-    fn cache_store_roundtrips_jsonl() -> Result<()> {
+    fn translation_validation_accepts_japanese_translation() -> Result<()> {
+        validate_translation_response(
+            "The quick brown fox jumps over the lazy dog.",
+            "すばやい茶色の狐が怠け者の犬を飛び越える。",
+        )
+    }
+
+    #[test]
+    fn translation_validation_rejects_unchanged_source() {
+        let err = validate_translation_response(
+            "The quick brown fox jumps over the lazy dog.",
+            "The quick brown fox jumps over the lazy dog.",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unchanged"));
+    }
+
+    #[test]
+    fn translation_validation_rejects_prompt_wrapper_leak() {
+        let err = validate_translation_response(
+            "The quick brown fox jumps over the lazy dog.",
+            "<source>\nすばやい茶色の狐。\n</source>",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("prompt wrapper"));
+    }
+
+    #[test]
+    fn translation_validation_rejects_missing_placeholder() {
+        let err = validate_translation_response("Read ⟦E1⟧this link⟦/E1⟧.", "このリンクを読む。")
+            .unwrap_err();
+        assert!(err.to_string().contains("placeholders"));
+    }
+
+    #[test]
+    fn translation_validation_accepts_reordered_placeholders() -> Result<()> {
+        validate_translation_response(
+            "Read ⟦E1⟧this link⟦/E1⟧ before ⟦E2⟧that note⟦/E2⟧.",
+            "⟦E2⟧その注記⟦/E2⟧の前に⟦E1⟧このリンク⟦/E1⟧を読む。",
+        )
+    }
+
+    #[test]
+    fn translation_validation_rejects_english_response() {
+        let err = validate_translation_response(
+            "This paragraph should be translated into Japanese.",
+            "This paragraph cannot be translated right now.",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Japanese"));
+    }
+
+    #[test]
+    fn refusal_validation_errors_are_classified_for_fallback() {
+        let err = validate_translation_response(
+            "This paragraph should be translated into Japanese.",
+            "As an AI language model, I cannot translate this passage.",
+        )
+        .unwrap_err();
+        assert!(is_refusal_validation_error(&err));
+    }
+
+    #[test]
+    fn translation_validation_rejects_likely_truncated_long_translation() {
+        let source = "This long paragraph has enough words to look like a complete sentence. It continues with more detail, context, and supporting clauses so that a very short Japanese answer should be suspicious.";
+        let err =
+            validate_translation_response(source, "この長い段落には十分な語数があり").unwrap_err();
+        assert!(err.to_string().contains("truncated"));
+    }
+
+    #[test]
+    fn cached_english_response_is_not_counted_as_valid_cache_hit() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let cache_root = dir.path().join("cache");
         let input = dir.path().join("book.epub");
@@ -3027,6 +2330,8 @@ mod tests {
         let args = CommonArgs {
             provider: Provider::Ollama,
             model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
             ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
             openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
@@ -3036,13 +2341,65 @@ mod tests {
             temperature: 0.3,
             num_ctx: 8192,
             timeout_secs: 900,
-            retries: 2,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
+            style: "essay".to_string(),
+            glossary: None,
+            cache_root: Some(cache_root),
+            no_cache: false,
+            clear_cache: false,
+            keep_cache: false,
+            usage_only: false,
+            partial_from_cache: false,
+            dry_run: false,
+        };
+        let source = "This paragraph should be translated into Japanese.";
+        let mut cache = CacheStore::from_args(&input, &args)?;
+        let key = cache_key(Provider::Ollama, DEFAULT_MODEL, "essay", source, &[]);
+        cache.insert(CacheRecord {
+            key,
+            translated: source.to_string(),
+            provider: "ollama".to_string(),
+            model: DEFAULT_MODEL.to_string(),
+            at: chrono::Utc::now().to_rfc3339(),
+        })?;
+        let translator = Translator::new(args, cache)?;
+
+        assert!(!translator.has_cached_translation(source));
+        Ok(())
+    }
+
+    #[test]
+    fn cache_store_roundtrips_jsonl() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cache_root = dir.path().join("cache");
+        let input = dir.path().join("book.epub");
+        fs::write(&input, b"dummy")?;
+        let args = CommonArgs {
+            provider: Provider::Ollama,
+            model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
+            ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
+            claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
+            openai_api_key: None,
+            anthropic_api_key: None,
+            prompt_api_key: false,
+            temperature: 0.3,
+            num_ctx: 8192,
+            timeout_secs: 900,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
             glossary: None,
             cache_root: Some(cache_root.clone()),
             no_cache: false,
             clear_cache: false,
             keep_cache: false,
+            usage_only: false,
             partial_from_cache: false,
             dry_run: false,
         };
@@ -3088,6 +2445,8 @@ mod tests {
         let args = CommonArgs {
             provider: Provider::Ollama,
             model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
             ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
             openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
@@ -3097,20 +2456,26 @@ mod tests {
             temperature: 0.3,
             num_ctx: 8192,
             timeout_secs: 900,
-            retries: 2,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
             glossary: None,
             cache_root: Some(cache_root),
             no_cache: false,
             clear_cache: false,
             keep_cache: false,
+            usage_only: false,
             partial_from_cache: true,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;
         let mut translator = Translator::new(args, cache)?;
 
-        match translator.translate("Hello")? {
+        match translator
+            .translate_many(&["Hello".to_string()], None)?
+            .remove(0)
+        {
             Translation::Original => {}
             Translation::Translated { text, .. } => bail!("unexpected translation: {text}"),
         }
@@ -3128,6 +2493,8 @@ mod tests {
         let args = CommonArgs {
             provider: Provider::Ollama,
             model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
             ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
             openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
@@ -3137,13 +2504,16 @@ mod tests {
             temperature: 0.3,
             num_ctx: 8192,
             timeout_secs: 900,
-            retries: 2,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
             glossary: None,
             cache_root: Some(cache_root.clone()),
             no_cache: false,
             clear_cache: false,
             keep_cache: false,
+            usage_only: false,
             partial_from_cache: false,
             dry_run: false,
         };
@@ -3164,6 +2534,8 @@ mod tests {
         let args = CommonArgs {
             provider: Provider::Ollama,
             model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
             ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
             openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
@@ -3173,13 +2545,16 @@ mod tests {
             temperature: 0.3,
             num_ctx: 8192,
             timeout_secs: 900,
-            retries: 2,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
             glossary: None,
             cache_root: Some(cache_root),
             no_cache: false,
             clear_cache: false,
             keep_cache: true,
+            usage_only: false,
             partial_from_cache: false,
             dry_run: false,
         };
@@ -3187,6 +2562,52 @@ mod tests {
         let dir_path = cache.dir.clone();
         cache.finalize_completion()?;
         assert!(dir_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn usage_only_estimates_without_api_key() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("minimal.epub");
+        write_minimal_epub(&input)?;
+        let book = unpack_epub(&input)?;
+        let args = CommonArgs {
+            provider: Provider::Openai,
+            model: Some(DEFAULT_OPENAI_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
+            ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
+            claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
+            openai_api_key: None,
+            anthropic_api_key: None,
+            prompt_api_key: false,
+            temperature: 0.3,
+            num_ctx: 8192,
+            timeout_secs: 900,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
+            style: "essay".to_string(),
+            glossary: None,
+            cache_root: Some(dir.path().join("cache")),
+            no_cache: false,
+            clear_cache: false,
+            keep_cache: false,
+            usage_only: true,
+            partial_from_cache: false,
+            dry_run: false,
+        };
+        let cache = CacheStore::from_args(&input, &args)?;
+        let translator = Translator::new(args, cache)?;
+        let estimate = estimate_usage(&book, 1..=2, &translator)?;
+
+        assert_eq!(estimate.pages_selected, 2);
+        assert_eq!(estimate.blocks_total, 3);
+        assert_eq!(estimate.cached_blocks, 0);
+        assert_eq!(estimate.uncached_blocks, 3);
+        assert_eq!(estimate.estimated_requests, 3);
+        assert!(estimate.estimated_total_tokens() > 0);
         Ok(())
     }
 
