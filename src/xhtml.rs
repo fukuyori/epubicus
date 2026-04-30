@@ -17,9 +17,9 @@ use crate::{
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InlineEntry {
-    start: Option<Vec<u8>>,
-    end: Option<Vec<u8>>,
-    empty: Option<Vec<u8>>,
+    start: Option<Event<'static>>,
+    end: Option<Event<'static>>,
+    empty: Option<Event<'static>>,
 }
 
 #[derive(Debug, Default)]
@@ -209,7 +209,7 @@ pub(crate) fn encode_inline(events: &[Event<'static>]) -> Result<(String, Inline
             Event::Start(e) => {
                 let id = next_id;
                 next_id += 1;
-                map.entries.entry(id).or_default().start = Some(serialize_event(event)?);
+                map.entries.entry(id).or_default().start = Some(event.clone());
                 stack.push((e.name().as_ref().to_vec(), id));
                 text.push_str(&format!("⟦E{id}⟧"));
             }
@@ -223,13 +223,13 @@ pub(crate) fn encode_inline(events: &[Event<'static>]) -> Result<(String, Inline
                         next_id += 1;
                         id
                     });
-                map.entries.entry(id).or_default().end = Some(serialize_event(event)?);
+                map.entries.entry(id).or_default().end = Some(event.clone());
                 text.push_str(&format!("⟦/E{id}⟧"));
             }
             Event::Empty(_) => {
                 let id = next_id;
                 next_id += 1;
-                map.entries.entry(id).or_default().empty = Some(serialize_event(event)?);
+                map.entries.entry(id).or_default().empty = Some(event.clone());
                 text.push_str(&format!("⟦S{id}⟧"));
             }
             _ => {}
@@ -252,20 +252,25 @@ fn restore_inline(translated: &str, map: &InlineMap) -> Result<Vec<Event<'static
                 let Some(entry) = map.entries.get(&id) else {
                     bail!("unknown placeholder id {id}");
                 };
-                let bytes = match token {
+                let event = match token {
                     Token::Open(_) => entry.start.as_ref(),
                     Token::Close(_) => entry.end.as_ref(),
                     Token::SelfClose(_) => entry.empty.as_ref(),
                     Token::Text(_) => unreachable!(),
                 };
-                let Some(bytes) = bytes else {
+                let Some(event) = event else {
                     bail!("placeholder kind mismatch for id {id}");
                 };
-                events.push(parse_single_event(bytes)?);
+                events.push(event.clone());
             }
         }
     }
     Ok(events)
+}
+
+#[cfg(test)]
+pub(crate) fn try_restore_inline(translated: &str, map: &InlineMap) -> Result<Vec<Event<'static>>> {
+    restore_inline(translated, map)
 }
 
 pub(crate) fn restore_inline_or_original(
@@ -350,24 +355,6 @@ pub(crate) fn tokenize_placeholders(s: &str) -> Vec<Token> {
         tokens.push(Token::Text(rest.to_string()));
     }
     tokens
-}
-
-fn serialize_event(event: &Event<'static>) -> Result<Vec<u8>> {
-    let mut writer = Writer::new(Vec::new());
-    writer.write_event(event.clone())?;
-    Ok(writer.into_inner())
-}
-
-fn parse_single_event(bytes: &[u8]) -> Result<Event<'static>> {
-    let mut reader = Reader::from_reader(Cursor::new(bytes));
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Eof => bail!("could not parse serialized inline event"),
-            event => return Ok(event.into_owned()),
-        }
-    }
 }
 
 pub(crate) fn write_events<W: Write>(

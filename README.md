@@ -56,9 +56,118 @@ $env:EPUBICUS_CONCURRENCY = "4"
 cargo run -- translate .\book.epub -o .\book.ja.epub
 ```
 
+For local Ollama testing, a PowerShell template is available:
+
+```powershell
+Copy-Item .\scripts\local-ollama-env.template.ps1 .\scripts\local-ollama-env.ps1
+.\scripts\local-ollama-env.ps1 .\book.epub
+```
+
+The script sets `EPUBICUS_*` environment variables for Ollama, uses the input
+EPUB as `$InputEpub`, and writes the output next to the input with `_jp`
+appended to the file name:
+
+```text
+.\book.epub -> .\book_jp.epub
+```
+
+Useful modes:
+
+```powershell
+# Full local conversion
+.\scripts\local-ollama-env.ps1 .\book.epub
+
+# Page-range check
+.\scripts\local-ollama-env.ps1 .\book.epub -Mode page -From 3 -To 3
+
+# Assemble from cache without calling Ollama
+.\scripts\local-ollama-env.ps1 .\book.epub -Mode cache
+
+# Load variables and helper functions, but do not run
+. .\scripts\local-ollama-env.ps1 .\book.epub -NoRun
+```
+
+For OpenAI Batch API runs, use the matching Batch template:
+
+```powershell
+Copy-Item .\scripts\openai-batch-env.template.ps1 .\scripts\openai-batch-env.ps1
+$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
+.\scripts\openai-batch-env.ps1 .\book.epub
+```
+
+It also writes `.\book_jp.epub` next to the input file. Use a page range while
+checking cost and quality:
+
+```powershell
+.\scripts\openai-batch-env.ps1 .\book.epub -From 3 -To 3
+```
+
+To check or resume without immediately running:
+
+```powershell
+. .\scripts\openai-batch-env.ps1 .\book.epub -NoRun
+Invoke-EpubicusOpenAiBatchStatus
+Invoke-EpubicusOpenAiBatchVerify
+Invoke-EpubicusOpenAiBatch
+```
+
+For normal OpenAI API or Claude API runs, use the provider-specific templates:
+
+```powershell
+Copy-Item .\scripts\openai-env.template.ps1 .\scripts\openai-env.ps1
+$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
+.\scripts\openai-env.ps1 .\book.epub
+
+Copy-Item .\scripts\claude-env.template.ps1 .\scripts\claude-env.ps1
+$env:ANTHROPIC_API_KEY = Read-Host "Anthropic API key" -MaskInput
+.\scripts\claude-env.ps1 .\book.epub
+```
+
+Both templates support the same page-range and usage-estimate options:
+
+```powershell
+.\scripts\openai-env.ps1 .\book.epub -From 3 -To 3
+.\scripts\openai-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+.\scripts\claude-env.ps1 .\book.epub -From 3 -To 3
+.\scripts\claude-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+```
+
+For macOS/Linux shells, use the `.sh` templates instead:
+
+```bash
+cp scripts/local-ollama-env.template.sh scripts/local-ollama-env.sh
+chmod +x scripts/local-ollama-env.sh
+scripts/local-ollama-env.sh ./book.epub
+
+cp scripts/openai-env.template.sh scripts/openai-env.sh
+chmod +x scripts/openai-env.sh
+export OPENAI_API_KEY="..."
+scripts/openai-env.sh ./book.epub --from 3 --to 3 --usage-only
+
+cp scripts/claude-env.template.sh scripts/claude-env.sh
+chmod +x scripts/claude-env.sh
+export ANTHROPIC_API_KEY="..."
+scripts/claude-env.sh ./book.epub --from 3 --to 3 --usage-only
+
+cp scripts/openai-batch-env.template.sh scripts/openai-batch-env.sh
+chmod +x scripts/openai-batch-env.sh
+export OPENAI_API_KEY="..."
+scripts/openai-batch-env.sh ./book.epub --from 3 --to 3
+```
+
+See [docs/operation-guide.ja.md](docs/operation-guide.ja.md) for a practical
+Japanese workflow guide covering local Ollama, normal OpenAI/Claude API runs,
+OpenAI Batch API runs, cache recovery, and cost checks.
+
 Translation results are cached per-input EPUB under an OS-standard cache root (Windows: `%LOCALAPPDATA%\epubicus\cache`, Unix: `~/.cache/epubicus`). Each input gets its own subdirectory named after the SHA-256 hash of its bytes, with `manifest.json` and `translations.jsonl` inside.
 
 Provider responses are validated before they are written to the cache. Empty responses, unchanged English source text, prompt-wrapper leaks, missing inline placeholders, and likely refusal/explanation text are retried according to `--retries`. If a likely refusal/explanation still fails after retries and `--fallback-provider` is set, the original source text is translated again with the fallback provider. If the fallback also fails, the run stops without caching the bad response.
+
+When the same cache key is produced more than once, epubicus keeps the first
+valid cached translation. Identical duplicate writes are treated as already
+done; different later translations for the same key are ignored instead of
+overwriting the cache. This prevents nondeterministic local model output from
+turning a resumable run into a hard cache conflict.
 
 ```powershell
 cargo run -- translate .\book.epub -o .\book.ja.epub --cache-root .\.epubicus-cache
@@ -148,7 +257,45 @@ cargo run -- batch     <SUBCOMMAND>
 
 `unlock` removes a stale input-use flag for an EPUB. Without `--force`, it only removes the flag when the recorded process is no longer running on the same host.
 
-`batch prepare` creates local OpenAI Batch API request artifacts without making a network call. `batch submit` uploads `requests.jsonl` and creates an OpenAI Batch API job. `batch status` refreshes the remote status into `batch_manifest.json`. `batch fetch` downloads remote `output.jsonl` and `remote_errors.jsonl` without importing them. `batch import` imports the fetched `output.jsonl` into the normal translation cache; `--output <PATH>` can import another local Batch API output JSONL file. `batch reroute-local` marks selected unfinished items as `local_pending`. `batch translate-local` translates `local_pending` items through the normal provider backend and writes them to the original batch cache slots. Local fallback commands support `--limit <N>` and `--priority page-order|failed-first|hard-first|short-first|oldest-first` for bounded catch-up runs. `batch health` shows the local batch manifest, remote batch IDs, work item states, request count, import report, cache-backed work, and oldest pending age. `batch verify` checks the current EPUB, `work_items.jsonl`, and cache for missing, stale, orphaned, conflicting, or invalid entries.
+`batch prepare` creates local OpenAI Batch API request artifacts without making a network call. It writes compatibility `requests.jsonl` plus `requests.part-0001.jsonl` style part files; `--max-requests-per-file <N>` defaults to `50000` and `--max-bytes-per-file <N>` defaults to `200000000`. `batch run` orchestrates prepare, submit, status polling, fetch, import, health, and verify; without `--wait`, it stops after the current remote status if the batch is still running, so the same command can be re-run later. `batch submit` uploads each request part and creates one OpenAI Batch API job per part. `batch status` refreshes all remote part statuses into `batch_manifest.json`. `batch fetch` downloads missing part output/error files, reuses existing part files on rerun, and rebuilds aggregate `output.jsonl` and `remote_errors.jsonl` files. `batch import` imports the fetched `output.jsonl` into the normal translation cache, marks fetched remote error lines as `failed`, and reports `imported_with_errors` if any item failed or was rejected; already-cached identical output is reported separately and imports can be rerun. `batch retry-requests` writes `retry_requests.jsonl` for failed/rejected uncached items without submitting it. `--output <PATH>` can import another local Batch API output JSONL file. `batch reroute-local` marks selected unfinished items as `local_pending`. `batch translate-local` translates `local_pending` items through the normal provider backend and writes them to the original batch cache slots. Local fallback and retry-planning commands support `--limit <N>` and `--priority page-order|failed-first|hard-first|short-first|oldest-first` for bounded catch-up runs. `batch health` shows the local batch manifest, remote batch IDs, per-part remote status counts, work item states, request count, import report, cache-backed work, and oldest pending age. `batch verify` checks the current EPUB, `work_items.jsonl`, and cache for missing, stale, orphaned, conflicting, or invalid entries.
+
+One-command Batch API flow:
+
+```powershell
+$env:OPENAI_API_KEY = "..."
+cargo run -- batch run .\book.epub --provider openai --model gpt-5-mini --wait --poll-secs 60 --output .\book.ja.epub
+```
+
+The same command is resume-friendly. If it exits while the remote status is
+still `in_progress`, run it again later; it will skip already prepared or
+submitted work and continue from status/fetch/import. When `--output <PATH>` is
+set, it also assembles the final EPUB from the imported cache.
+
+Manual Batch API flow:
+
+```powershell
+$env:OPENAI_API_KEY = "..."
+cargo run -- batch prepare .\book.epub --provider openai --model gpt-5-mini
+cargo run -- batch submit .\book.epub --provider openai --model gpt-5-mini
+cargo run -- batch status .\book.epub
+cargo run -- batch fetch .\book.epub
+cargo run -- batch import .\book.epub
+cargo run -- translate .\book.epub --partial-from-cache --keep-cache
+```
+
+`batch verify` is useful after import or local rerouting. It compares the
+current EPUB extraction, `work_items.jsonl`, and the translation cache. Missing
+or invalid items can be retried remotely with `batch retry-requests` or moved
+to local translation with `batch reroute-local` and `batch translate-local`.
+
+If the remote batch returns failed or rejected items, either create a retry file
+for later remote handling or switch the remaining work to a local provider:
+
+```powershell
+cargo run -- batch retry-requests .\book.epub --limit 100 --priority failed-first
+cargo run -- batch reroute-local .\book.epub --remaining --priority short-first
+cargo run -- batch translate-local .\book.epub --provider ollama --model qwen3:14b --limit 100
+```
 
 ## Options
 
@@ -241,8 +388,9 @@ The asynchronous OpenAI Batch API workflow is designed in
 plan in
 [docs/batch-api-implementation-plan.md](docs/batch-api-implementation-plan.md).
 The current implementation supports the local `batch prepare`,
-`batch import`, `batch health`, `batch verify`, and OpenAI
-`batch submit/status/fetch` stages.
+`batch run`, `batch retry-requests`, `batch import`, `batch health`,
+`batch verify`, and OpenAI `batch submit/status/fetch` stages, including
+request-count and byte-count based multi-part Batch API jobs.
 
 ```powershell
 cargo run -- test .\book.epub --from 1 --to 1 --provider ollama --model qwen3:14b
@@ -336,15 +484,22 @@ Only entries whose `src` appears in the current block are sent to the provider, 
 - Production EPUB output mode.
 - Progress bar for production translation.
 - Test stdout mode for selected spine pages.
+- Output validation before cache writes, including retry for likely
+  untranslated English, refusal/explanation text, and missing inline
+  placeholders.
+- OpenAI Batch API prepare/submit/status/fetch/import/verify/run workflow with
+  multi-part request files and local fallback routing.
+- Environment template scripts for PowerShell and POSIX shells.
 
 ## Limitations
 
 - EPUB reader page numbers are not used. Ranges are OPF spine numbers.
 - `--partial-from-cache` does not call a model, replaces cache hits with translated text, and leaves cache misses unchanged. It cannot be combined with `--no-cache`.
 - `nav.xhtml` / NCX display is implemented, but TOC translation is not implemented yet.
-- Retry policy and detailed fallback reports are not implemented yet.
+- Detailed fallback reports are not implemented yet.
 - Code/preformatted content is protected from translation.
-- Provider pricing estimates are not implemented.
+- `--usage-only` estimates request and token volume before the provider is
+  called, but it does not calculate provider-specific currency cost.
 
 ## Troubleshooting
 

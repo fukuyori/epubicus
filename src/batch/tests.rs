@@ -1,7 +1,8 @@
-use super::local::{batch_import, batch_prepare};
+use super::local::{batch_import, batch_prepare, batch_retry_requests};
 use super::*;
 use crate::config::{
-    CommonArgs, DEFAULT_CLAUDE_BASE_URL, DEFAULT_CONCURRENCY, DEFAULT_MAX_CHARS_PER_REQUEST,
+    CommonArgs, DEFAULT_BATCH_MAX_BYTES_PER_FILE, DEFAULT_BATCH_MAX_REQUESTS_PER_FILE,
+    DEFAULT_CLAUDE_BASE_URL, DEFAULT_CONCURRENCY, DEFAULT_MAX_CHARS_PER_REQUEST,
     DEFAULT_OLLAMA_HOST, DEFAULT_OPENAI_BASE_URL,
 };
 use zip::{
@@ -32,6 +33,8 @@ fn batch_prepare_writes_manifest_work_items_and_requests() -> Result<()> {
         input: input.clone(),
         from: Some(1),
         to: Some(1),
+        max_requests_per_file: DEFAULT_BATCH_MAX_REQUESTS_PER_FILE,
+        max_bytes_per_file: DEFAULT_BATCH_MAX_BYTES_PER_FILE,
         common: common_args(dir.path().join("cache")),
     };
 
@@ -45,11 +48,22 @@ fn batch_prepare_writes_manifest_work_items_and_requests() -> Result<()> {
     assert_eq!(manifest["model"], DEFAULT_OPENAI_MODEL);
     assert_eq!(manifest["endpoint"], "/v1/responses");
     assert_eq!(manifest["request_count"], 2);
+    assert_eq!(
+        manifest["parts"].as_array().context("missing parts")?.len(),
+        1
+    );
+    assert_eq!(
+        manifest["parts"][0]["request_file"],
+        "requests.part-0001.jsonl"
+    );
+    assert!(manifest["parts"][0]["request_bytes"].as_u64().unwrap() > 0);
 
     let work_items = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
     let requests = read_jsonl_values(&batch_dir.join(REQUESTS_FILE))?;
+    let part_requests = read_jsonl_values(&batch_dir.join("requests.part-0001.jsonl"))?;
     assert_eq!(work_items.len(), 2);
     assert_eq!(requests.len(), 2);
+    assert_eq!(part_requests.len(), 2);
     assert_eq!(work_items[0]["state"], "prepared");
     assert_eq!(work_items[0]["page_index"], 1);
     assert_eq!(work_items[0]["block_index"], 1);
@@ -63,6 +77,136 @@ fn batch_prepare_writes_manifest_work_items_and_requests() -> Result<()> {
             .unwrap()
             .contains("<source>")
     );
+    Ok(())
+}
+
+#[test]
+fn batch_prepare_splits_request_parts_by_request_count() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+
+    batch_prepare(BatchPrepareArgs {
+        input: input.clone(),
+        from: Some(1),
+        to: Some(1),
+        max_requests_per_file: 1,
+        max_bytes_per_file: DEFAULT_BATCH_MAX_BYTES_PER_FILE,
+        common: common_args(cache_root.clone()),
+    })?;
+
+    let cache = CacheStore::from_args(&input, &common_args(cache_root))?;
+    let batch_dir = cache.dir.join(BATCH_DIR);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    let parts = manifest["parts"].as_array().context("missing parts")?;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["request_file"], "requests.part-0001.jsonl");
+    assert_eq!(parts[0]["request_count"], 1);
+    assert_eq!(parts[1]["request_file"], "requests.part-0002.jsonl");
+    assert_eq!(parts[1]["request_count"], 1);
+    assert_eq!(read_jsonl_values(&batch_dir.join(REQUESTS_FILE))?.len(), 2);
+    assert_eq!(
+        read_jsonl_values(&batch_dir.join("requests.part-0001.jsonl"))?.len(),
+        1
+    );
+    assert_eq!(
+        read_jsonl_values(&batch_dir.join("requests.part-0002.jsonl"))?.len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn batch_prepare_splits_request_parts_by_byte_count() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+
+    batch_prepare(BatchPrepareArgs {
+        input: input.clone(),
+        from: Some(1),
+        to: Some(1),
+        max_requests_per_file: DEFAULT_BATCH_MAX_REQUESTS_PER_FILE,
+        max_bytes_per_file: 1_500,
+        common: common_args(cache_root.clone()),
+    })?;
+
+    let cache = CacheStore::from_args(&input, &common_args(cache_root))?;
+    let batch_dir = cache.dir.join(BATCH_DIR);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    let parts = manifest["parts"].as_array().context("missing parts")?;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["request_count"], 1);
+    assert_eq!(parts[1]["request_count"], 1);
+    assert!(parts[0]["request_bytes"].as_u64().unwrap() <= 1_500);
+    assert!(parts[1]["request_bytes"].as_u64().unwrap() <= 1_500);
+    Ok(())
+}
+
+#[test]
+fn batch_prepare_rejects_single_request_over_byte_limit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+
+    let err = batch_prepare(BatchPrepareArgs {
+        input,
+        from: Some(1),
+        to: Some(1),
+        max_requests_per_file: DEFAULT_BATCH_MAX_REQUESTS_PER_FILE,
+        max_bytes_per_file: 700,
+        common: common_args(cache_root),
+    })
+    .unwrap_err();
+
+    assert!(err.to_string().contains("larger than --max-bytes-per-file"));
+    Ok(())
+}
+
+#[test]
+fn batch_prepare_rerun_removes_stale_part_and_output_artifacts() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+
+    batch_prepare(BatchPrepareArgs {
+        input: input.clone(),
+        from: Some(1),
+        to: Some(1),
+        max_requests_per_file: 1,
+        max_bytes_per_file: DEFAULT_BATCH_MAX_BYTES_PER_FILE,
+        common: common_args(cache_root.clone()),
+    })?;
+
+    let cache = CacheStore::from_args(&input, &common_args(cache_root.clone()))?;
+    let batch_dir = cache.dir.join(BATCH_DIR);
+    assert!(batch_dir.join("requests.part-0002.jsonl").exists());
+    fs::write(batch_dir.join(OUTPUT_FILE), "{}\n")?;
+    fs::write(batch_dir.join(output_part_file_name(2)), "{}\n")?;
+    fs::write(batch_dir.join(remote_error_part_file_name(2)), "{}\n")?;
+    fs::write(batch_dir.join(REJECTED_FILE), "{}\n")?;
+
+    batch_prepare(BatchPrepareArgs {
+        input,
+        from: Some(1),
+        to: Some(1),
+        max_requests_per_file: DEFAULT_BATCH_MAX_REQUESTS_PER_FILE,
+        max_bytes_per_file: DEFAULT_BATCH_MAX_BYTES_PER_FILE,
+        common: common_args(cache_root),
+    })?;
+
+    assert!(batch_dir.join("requests.part-0001.jsonl").exists());
+    assert!(!batch_dir.join("requests.part-0002.jsonl").exists());
+    assert!(!batch_dir.join(OUTPUT_FILE).exists());
+    assert!(!batch_dir.join(output_part_file_name(2)).exists());
+    assert!(!batch_dir.join(remote_error_part_file_name(2)).exists());
+    assert!(!batch_dir.join(REJECTED_FILE).exists());
     Ok(())
 }
 
@@ -104,6 +248,36 @@ fn batch_health_reports_remote_manifest_and_pending_age() -> Result<()> {
     manifest["output_file_id"] = serde_json::Value::String("file_output".to_string());
     manifest["error_file_id"] = serde_json::Value::String("file_error".to_string());
     manifest["failed_count"] = serde_json::Value::Number(2.into());
+    manifest["parts"] = serde_json::json!([
+        {
+            "index": 1,
+            "request_file": "requests.part-0001.jsonl",
+            "request_count": 1,
+            "request_bytes": 100,
+            "file_id": "file_1",
+            "batch_id": "batch_1",
+            "status": "completed",
+            "output_file_id": "file_output",
+            "error_file_id": null,
+            "output_file": null,
+            "error_file": null,
+            "failed_count": 0
+        },
+        {
+            "index": 2,
+            "request_file": "requests.part-0002.jsonl",
+            "request_count": 1,
+            "request_bytes": 100,
+            "file_id": "file_2",
+            "batch_id": "batch_2",
+            "status": "failed",
+            "output_file_id": null,
+            "error_file_id": "file_error",
+            "output_file": null,
+            "error_file": null,
+            "failed_count": 2
+        }
+    ]);
     fs::write(
         batch_dir.join(BATCH_MANIFEST_FILE),
         serde_json::to_vec_pretty(&manifest)?,
@@ -125,6 +299,11 @@ fn batch_health_reports_remote_manifest_and_pending_age() -> Result<()> {
     );
     assert_eq!(health.manifest_error_file_id.as_deref(), Some("file_error"));
     assert_eq!(health.manifest_failed_count, Some(2));
+    assert_eq!(
+        health.manifest_part_status_counts.get("completed"),
+        Some(&1)
+    );
+    assert_eq!(health.manifest_part_status_counts.get("failed"), Some(&1));
     assert!(health.oldest_pending_age_secs.unwrap_or_default() >= 7_000);
     Ok(())
 }
@@ -161,6 +340,32 @@ fn batch_health_reports_imported_cache_entries() -> Result<()> {
     let report = health.import_report.context("missing import report")?;
     assert_eq!(report.imported_count, 2);
     assert_eq!(report.rejected_count, 0);
+    Ok(())
+}
+
+#[test]
+fn batch_health_excludes_local_imported_from_pending_age() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, mut work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    for item in &mut work_items {
+        item["state"] = serde_json::Value::String("local_imported".to_string());
+        item["updated_at"] = serde_json::Value::String(
+            (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+        );
+    }
+    write_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE), &work_items)?;
+
+    let health = report::collect_batch_health(&BatchHealthArgs {
+        input,
+        common: common_args(cache_root),
+    })?;
+
+    assert_eq!(health.state_counts.get("local_imported"), Some(&2));
+    assert!(health.oldest_pending_at.is_none());
+    assert!(health.oldest_pending_age_secs.is_none());
     Ok(())
 }
 
@@ -228,6 +433,58 @@ fn batch_verify_detects_imported_state_without_cache() -> Result<()> {
 }
 
 #[test]
+fn batch_verify_accepts_local_imported_cache_entries() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, mut work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    work_items[0]["state"] = serde_json::Value::String("local_imported".to_string());
+    write_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE), &work_items)?;
+
+    let mut cache = CacheStore::from_args(&input, &common_args(cache_root.clone()))?;
+    let key = work_items[0]["cache_key"]
+        .as_str()
+        .context("missing cache_key")?;
+    cache.insert(crate::cache::CacheRecord {
+        key: key.to_string(),
+        translated: "これは有効な日本語訳です。".to_string(),
+        provider: "ollama".to_string(),
+        model: DEFAULT_OPENAI_MODEL.to_string(),
+        at: chrono::Utc::now().to_rfc3339(),
+    })?;
+
+    let report = report::collect_batch_verify(&BatchVerifyArgs {
+        input,
+        common: common_args(cache_root),
+    })?;
+
+    assert!(report.cache_conflict.is_empty());
+    assert!(report.invalid_cache.is_empty());
+    Ok(())
+}
+
+#[test]
+fn batch_and_cache_locks_are_exclusive_in_stable_order() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (_batch_dir, _work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    let cache = CacheStore::from_args(&input, &common_args(cache_root))?;
+    let batch_lock_path = batch_lock_path(&cache);
+
+    let _batch_lock = FileLock::acquire(&batch_lock_path, "test batch writer")?;
+    let batch_err = FileLock::acquire_nowait(&batch_lock_path, "test batch contender").unwrap_err();
+    assert!(batch_err.to_string().contains("already using this input"));
+
+    let _cache_lock = FileLock::acquire_nowait(&cache.lock_path, "test cache after batch")?;
+    let cache_err = FileLock::acquire_nowait(&cache.lock_path, "test cache contender").unwrap_err();
+    assert!(cache_err.to_string().contains("already using this input"));
+    Ok(())
+}
+
+#[test]
 fn remote_batch_response_updates_manifest_ids_and_status() {
     let mut manifest = fixture_manifest();
     let remote = OpenAiBatch {
@@ -245,6 +502,331 @@ fn remote_batch_response_updates_manifest_ids_and_status() {
     assert_eq!(manifest.output_file_id.as_deref(), Some("file_output"));
     assert_eq!(manifest.error_file_id.as_deref(), Some("file_error"));
     assert_eq!(manifest.failed_count, 3);
+}
+
+#[test]
+fn batch_part_status_aggregation_is_stable() {
+    let mut completed = fixture_part(1, "completed");
+    let mut failed = fixture_part(2, "failed");
+    let in_progress = fixture_part(3, "in_progress");
+    let submitted = fixture_part(4, "submitted");
+
+    assert_eq!(
+        remote::aggregate_part_status(&[completed.clone(), fixture_part(2, "completed")]),
+        "completed"
+    );
+    assert_eq!(
+        remote::aggregate_part_status(&[completed.clone(), failed.clone()]),
+        "failed"
+    );
+    assert_eq!(
+        remote::aggregate_part_status(&[completed.clone(), in_progress]),
+        "in_progress"
+    );
+    assert_eq!(
+        remote::aggregate_part_status(&[submitted.clone(), fixture_part(5, "submitted")]),
+        "submitted"
+    );
+    completed.status = "completed".to_string();
+    failed.status = "submitted".to_string();
+    assert_eq!(
+        remote::aggregate_part_status(&[completed, failed]),
+        "partial"
+    );
+    assert_eq!(remote::aggregate_part_status(&[]), "prepared");
+}
+
+#[test]
+fn batch_submit_resume_selects_only_unsubmitted_parts() {
+    let mut manifest = fixture_manifest();
+    manifest.parts = vec![
+        BatchPart {
+            index: 1,
+            request_file: request_part_file_name(1),
+            request_count: 1,
+            request_bytes: 100,
+            file_id: Some("file_1".to_string()),
+            batch_id: Some("batch_1".to_string()),
+            status: "in_progress".to_string(),
+            output_file_id: None,
+            error_file_id: None,
+            output_file: None,
+            error_file: None,
+            failed_count: 0,
+        },
+        BatchPart {
+            index: 2,
+            request_file: request_part_file_name(2),
+            request_count: 1,
+            request_bytes: 100,
+            file_id: None,
+            batch_id: None,
+            status: "prepared".to_string(),
+            output_file_id: None,
+            error_file_id: None,
+            output_file: None,
+            error_file: None,
+            failed_count: 0,
+        },
+    ];
+
+    assert_eq!(
+        remote::part_indices_to_submit(&manifest, false).unwrap(),
+        vec![2]
+    );
+    assert_eq!(
+        remote::part_indices_to_submit(&manifest, true).unwrap(),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn batch_submit_resume_refuses_when_every_part_submitted_without_force() {
+    let mut manifest = fixture_manifest();
+    manifest.parts[0].file_id = Some("file_1".to_string());
+    manifest.parts[0].batch_id = Some("batch_1".to_string());
+
+    let err = remote::part_indices_to_submit(&manifest, false).unwrap_err();
+
+    assert!(err.to_string().contains("every part"));
+}
+
+#[test]
+fn batch_fetch_resume_skips_existing_part_files() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let batch_dir = dir.path();
+    let existing = batch_dir.join(output_part_file_name(1));
+    fs::write(&existing, "{}\n")?;
+    let mut manifest = fixture_manifest();
+    manifest.parts = vec![
+        BatchPart {
+            index: 1,
+            request_file: request_part_file_name(1),
+            request_count: 1,
+            request_bytes: 100,
+            file_id: Some("file_req_1".to_string()),
+            batch_id: Some("batch_1".to_string()),
+            status: "completed".to_string(),
+            output_file_id: Some("file_out_1".to_string()),
+            error_file_id: None,
+            output_file: None,
+            error_file: None,
+            failed_count: 0,
+        },
+        BatchPart {
+            index: 2,
+            request_file: request_part_file_name(2),
+            request_count: 1,
+            request_bytes: 100,
+            file_id: Some("file_req_2".to_string()),
+            batch_id: Some("batch_2".to_string()),
+            status: "completed".to_string(),
+            output_file_id: Some("file_out_2".to_string()),
+            error_file_id: None,
+            output_file: None,
+            error_file: None,
+            failed_count: 0,
+        },
+    ];
+
+    let plan = remote::plan_fetch_parts(&manifest, batch_dir, false)?;
+
+    assert_eq!(plan.output_paths.len(), 2);
+    assert_eq!(plan.output_downloads.len(), 1);
+    assert_eq!(plan.output_downloads[0].index, 2);
+    assert_eq!(plan.output_downloads[0].file_id, "file_out_2");
+    Ok(())
+}
+
+#[test]
+fn batch_fetch_force_redownloads_existing_part_files() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let batch_dir = dir.path();
+    fs::write(batch_dir.join(output_part_file_name(1)), "{}\n")?;
+    let mut manifest = fixture_manifest();
+    manifest.parts[0].output_file_id = Some("file_out_1".to_string());
+
+    let plan = remote::plan_fetch_parts(&manifest, batch_dir, true)?;
+
+    assert_eq!(plan.output_paths.len(), 1);
+    assert_eq!(plan.output_downloads.len(), 1);
+    assert_eq!(plan.output_downloads[0].index, 1);
+    Ok(())
+}
+
+#[test]
+fn batch_import_reads_assembled_multi_part_output() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    batch_prepare(BatchPrepareArgs {
+        input: input.clone(),
+        from: Some(1),
+        to: Some(1),
+        max_requests_per_file: 1,
+        max_bytes_per_file: DEFAULT_BATCH_MAX_BYTES_PER_FILE,
+        common: common_args(cache_root.clone()),
+    })?;
+    let cache = CacheStore::from_args(&input, &common_args(cache_root.clone()))?;
+    let batch_dir = cache.dir.join(BATCH_DIR);
+    let work_items = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(work_items.len(), 2);
+
+    let part_1 = batch_dir.join(output_part_file_name(1));
+    let part_2 = batch_dir.join(output_part_file_name(2));
+    write_fixture_output(&part_1, &work_items[0..1], |source| {
+        if source.contains("⟦E") {
+            "こんにちは、⟦E1⟧世界⟦/E1⟧。".to_string()
+        } else {
+            "これは有効な日本語訳です。".to_string()
+        }
+    })?;
+    write_fixture_output(&part_2, &work_items[1..2], |source| {
+        if source.contains("⟦E") {
+            "こんにちは、⟦E1⟧世界⟦/E1⟧。".to_string()
+        } else {
+            "これは有効な日本語訳です。".to_string()
+        }
+    })?;
+    remote::concatenate_jsonl_files(
+        &batch_dir.join(OUTPUT_FILE),
+        [part_1.as_path(), part_2.as_path()],
+        true,
+    )?;
+
+    batch_import(BatchImportArgs {
+        input: input.clone(),
+        output: None,
+        common: common_args(cache_root.clone()),
+    })?;
+
+    let imported_cache = CacheStore::from_args(&input, &common_args(cache_root))?;
+    for item in &work_items {
+        let key = item["cache_key"].as_str().context("missing cache_key")?;
+        assert!(imported_cache.peek(key).is_some());
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    assert_eq!(manifest["imported_count"], 2);
+    Ok(())
+}
+
+#[test]
+fn batch_import_marks_remote_error_lines_failed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    write_fixture_output(&batch_dir.join(OUTPUT_FILE), &work_items[0..1], |source| {
+        if source.contains("⟦E") {
+            "こんにちは、⟦E1⟧世界⟦/E1⟧。".to_string()
+        } else {
+            "これは有効な日本語訳です。".to_string()
+        }
+    })?;
+    write_remote_error_output(&batch_dir.join(REMOTE_ERRORS_FILE), &work_items[1..2])?;
+
+    batch_import(BatchImportArgs {
+        input: input.clone(),
+        output: None,
+        common: common_args(cache_root.clone()),
+    })?;
+
+    let updated = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(updated[0]["state"], "imported");
+    assert_eq!(updated[1]["state"], "failed");
+    assert!(
+        updated[1]["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("remote batch error")
+    );
+    let errors = read_jsonl_values(&batch_dir.join(ERRORS_FILE))?;
+    assert_eq!(errors.len(), 1);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    assert_eq!(manifest["status"], "imported_with_errors");
+    assert_eq!(manifest["imported_count"], 1);
+    assert_eq!(manifest["failed_count"], 1);
+    assert!(
+        manifest["error_file"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(REMOTE_ERRORS_FILE)
+    );
+    let imported_cache = CacheStore::from_args(&input, &common_args(cache_root))?;
+    let failed_key = work_items[1]["cache_key"]
+        .as_str()
+        .context("missing cache_key")?;
+    assert!(imported_cache.peek(failed_key).is_none());
+    Ok(())
+}
+
+#[test]
+fn batch_import_accepts_remote_errors_without_output_file() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    write_remote_error_output(&batch_dir.join(REMOTE_ERRORS_FILE), &work_items)?;
+
+    batch_import(BatchImportArgs {
+        input,
+        output: None,
+        common: common_args(cache_root),
+    })?;
+
+    let updated = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(updated[0]["state"], "failed");
+    assert_eq!(updated[1]["state"], "failed");
+    let errors = read_jsonl_values(&batch_dir.join(ERRORS_FILE))?;
+    assert_eq!(errors.len(), 2);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    assert_eq!(manifest["status"], "imported_with_errors");
+    assert_eq!(manifest["imported_count"], 0);
+    assert_eq!(manifest["failed_count"], 2);
+    assert!(
+        manifest["error_file"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(REMOTE_ERRORS_FILE)
+    );
+    Ok(())
+}
+
+#[test]
+fn batch_reroute_local_can_select_remote_failed_items() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    write_remote_error_output(&batch_dir.join(REMOTE_ERRORS_FILE), &work_items)?;
+
+    batch_import(BatchImportArgs {
+        input: input.clone(),
+        output: None,
+        common: common_args(cache_root.clone()),
+    })?;
+    let summary = reroute::reroute_local_items(&BatchRerouteLocalArgs {
+        input,
+        states: vec!["failed".to_string()],
+        remaining: false,
+        endgame_threshold: None,
+        limit: None,
+        priority: BatchPriority::PageOrder,
+        common: common_args(cache_root),
+    })?;
+
+    assert_eq!(summary.selected_count, 2);
+    let updated = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(updated[0]["state"], "local_pending");
+    assert_eq!(updated[1]["state"], "local_pending");
+    Ok(())
 }
 
 #[test]
@@ -329,6 +911,68 @@ fn batch_import_accepts_reordered_output() -> Result<()> {
         serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
     assert_eq!(manifest["imported_count"], 2);
     assert_eq!(manifest["rejected_count"], 0);
+    Ok(())
+}
+
+#[test]
+fn batch_import_recovers_cache_ahead_of_ledger() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    let output_path = dir.path().join("output.jsonl");
+    write_fixture_output(&output_path, &work_items, |source| {
+        if source.contains("⟦E") {
+            "こんにちは、⟦E1⟧世界⟦/E1⟧。".to_string()
+        } else {
+            "これは有効な日本語訳です。".to_string()
+        }
+    })?;
+
+    let first_item = &work_items[0];
+    let first_source = first_item["source_text"]
+        .as_str()
+        .context("missing source_text")?;
+    let first_translation = if first_source.contains("⟦E") {
+        "こんにちは、⟦E1⟧世界⟦/E1⟧。"
+    } else {
+        "これは有効な日本語訳です。"
+    };
+    let mut cache = CacheStore::from_args(&input, &common_args(cache_root.clone()))?;
+    cache.insert(crate::cache::CacheRecord {
+        key: first_item["cache_key"]
+            .as_str()
+            .context("missing cache_key")?
+            .to_string(),
+        translated: first_translation.to_string(),
+        provider: first_item["provider"]
+            .as_str()
+            .context("missing provider")?
+            .to_string(),
+        model: first_item["model"]
+            .as_str()
+            .context("missing model")?
+            .to_string(),
+        at: chrono::Utc::now().to_rfc3339(),
+    })?;
+
+    batch_import(BatchImportArgs {
+        input: input.clone(),
+        output: Some(output_path),
+        common: common_args(cache_root.clone()),
+    })?;
+
+    let report: ImportReport =
+        serde_json::from_slice(&fs::read(batch_dir.join(IMPORT_REPORT_FILE))?)?;
+    assert_eq!(report.imported_count, 1);
+    assert_eq!(report.already_cached_count, 1);
+    let updated = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(updated[0]["state"], "imported");
+    assert_eq!(updated[1]["state"], "imported");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    assert_eq!(manifest["imported_count"], 2);
     Ok(())
 }
 
@@ -446,6 +1090,76 @@ fn batch_reroute_local_short_first_honors_limit() -> Result<()> {
 }
 
 #[test]
+fn batch_reroute_local_remaining_can_be_rerun() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, _work_items) = prepare_minimal_batch(&input, &cache_root)?;
+
+    let args = BatchRerouteLocalArgs {
+        input,
+        states: Vec::new(),
+        remaining: true,
+        endgame_threshold: None,
+        limit: None,
+        priority: BatchPriority::PageOrder,
+        common: common_args(cache_root),
+    };
+
+    let first = reroute::reroute_local_items(&args)?;
+    assert_eq!(first.selected_count, 2);
+    let updated = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(updated[0]["state"], "local_pending");
+    assert_eq!(updated[1]["state"], "local_pending");
+
+    let second = reroute::reroute_local_items(&args)?;
+    assert_eq!(second.selected_count, 0);
+    let rerun = read_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE))?;
+    assert_eq!(rerun[0]["state"], "local_pending");
+    assert_eq!(rerun[1]["state"], "local_pending");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    assert_eq!(manifest["status"], "local_pending");
+    Ok(())
+}
+
+#[test]
+fn batch_import_can_be_rerun_after_success() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    let output_path = dir.path().join("output.jsonl");
+    write_fixture_output(&output_path, &work_items, |source| {
+        if source.contains("⟦E") {
+            "こんにちは、⟦E1⟧世界⟦/E1⟧。".to_string()
+        } else {
+            "これは有効な日本語訳です。".to_string()
+        }
+    })?;
+
+    for _ in 0..2 {
+        batch_import(BatchImportArgs {
+            input: input.clone(),
+            output: Some(output_path.clone()),
+            common: common_args(cache_root.clone()),
+        })?;
+    }
+
+    let report: ImportReport =
+        serde_json::from_slice(&fs::read(batch_dir.join(IMPORT_REPORT_FILE))?)?;
+    assert_eq!(report.imported_count, 0);
+    assert_eq!(report.already_cached_count, 2);
+    assert_eq!(report.rejected_count, 0);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(batch_dir.join(BATCH_MANIFEST_FILE))?)?;
+    assert_eq!(manifest["imported_count"], 2);
+    Ok(())
+}
+
+#[test]
 fn batch_translate_local_marks_cached_pending_items_imported() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let input = dir.path().join("minimal.epub");
@@ -551,6 +1265,95 @@ fn batch_import_rejects_invalid_translation_without_caching() -> Result<()> {
 }
 
 #[test]
+fn batch_retry_requests_defaults_to_failed_and_rejected_items() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, mut work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    work_items[0]["state"] = serde_json::Value::String("failed".to_string());
+    work_items[1]["state"] = serde_json::Value::String("rejected".to_string());
+    write_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE), &work_items)?;
+
+    batch_retry_requests(BatchRetryArgs {
+        input,
+        states: Vec::new(),
+        limit: None,
+        priority: BatchPriority::PageOrder,
+        common: common_args(cache_root),
+    })?;
+
+    let retry_requests = read_jsonl_values(&batch_dir.join(RETRY_REQUESTS_FILE))?;
+    assert_eq!(retry_requests.len(), 2);
+    assert_eq!(retry_requests[0]["custom_id"], work_items[0]["custom_id"]);
+    assert_eq!(retry_requests[1]["custom_id"], work_items[1]["custom_id"]);
+    Ok(())
+}
+
+#[test]
+fn batch_retry_requests_honors_state_limit_and_cache_skip() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, mut work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    work_items[0]["state"] = serde_json::Value::String("failed".to_string());
+    work_items[1]["state"] = serde_json::Value::String("rejected".to_string());
+    write_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE), &work_items)?;
+    let mut cache = CacheStore::from_args(&input, &common_args(cache_root.clone()))?;
+    cache.insert(crate::cache::CacheRecord {
+        key: work_items[1]["cache_key"]
+            .as_str()
+            .context("missing cache_key")?
+            .to_string(),
+        translated: "これは有効な日本語訳です。".to_string(),
+        provider: "openai".to_string(),
+        model: DEFAULT_OPENAI_MODEL.to_string(),
+        at: chrono::Utc::now().to_rfc3339(),
+    })?;
+
+    batch_retry_requests(BatchRetryArgs {
+        input,
+        states: vec!["rejected".to_string(), "failed".to_string()],
+        limit: Some(1),
+        priority: BatchPriority::PageOrder,
+        common: common_args(cache_root),
+    })?;
+
+    let retry_requests = read_jsonl_values(&batch_dir.join(RETRY_REQUESTS_FILE))?;
+    assert_eq!(retry_requests.len(), 1);
+    assert_eq!(retry_requests[0]["custom_id"], work_items[0]["custom_id"]);
+    Ok(())
+}
+
+#[test]
+fn batch_retry_requests_short_first_honors_limit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("minimal.epub");
+    write_minimal_epub(&input)?;
+    let cache_root = dir.path().join("cache");
+    let (batch_dir, mut work_items) = prepare_minimal_batch(&input, &cache_root)?;
+    work_items[0]["state"] = serde_json::Value::String("failed".to_string());
+    work_items[1]["state"] = serde_json::Value::String("failed".to_string());
+    work_items[0]["source_chars"] = serde_json::json!(500);
+    work_items[1]["source_chars"] = serde_json::json!(1);
+    write_jsonl_values(&batch_dir.join(WORK_ITEMS_FILE), &work_items)?;
+
+    batch_retry_requests(BatchRetryArgs {
+        input,
+        states: Vec::new(),
+        limit: Some(1),
+        priority: BatchPriority::ShortFirst,
+        common: common_args(cache_root),
+    })?;
+
+    let retry_requests = read_jsonl_values(&batch_dir.join(RETRY_REQUESTS_FILE))?;
+    assert_eq!(retry_requests.len(), 1);
+    assert_eq!(retry_requests[0]["custom_id"], work_items[1]["custom_id"]);
+    Ok(())
+}
+
+#[test]
 fn batch_import_reports_duplicate_output_custom_id() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let input = dir.path().join("minimal.epub");
@@ -631,6 +1434,8 @@ fn prepare_minimal_batch(
         input: input.to_path_buf(),
         from: Some(1),
         to: Some(1),
+        max_requests_per_file: DEFAULT_BATCH_MAX_REQUESTS_PER_FILE,
+        max_bytes_per_file: DEFAULT_BATCH_MAX_BYTES_PER_FILE,
         common: common_args(cache_root.to_path_buf()),
     })?;
     let cache = CacheStore::from_args(input, &common_args(cache_root.to_path_buf()))?;
@@ -652,6 +1457,20 @@ fn fixture_manifest() -> BatchManifest {
         request_file: REQUESTS_FILE.to_string(),
         work_items_file: WORK_ITEMS_FILE.to_string(),
         request_count: 1,
+        parts: vec![BatchPart {
+            index: 1,
+            request_file: request_part_file_name(1),
+            request_count: 1,
+            request_bytes: 0,
+            file_id: None,
+            batch_id: None,
+            status: "prepared".to_string(),
+            output_file_id: None,
+            error_file_id: None,
+            output_file: None,
+            error_file: None,
+            failed_count: 0,
+        }],
         file_id: None,
         batch_id: None,
         status: "prepared".to_string(),
@@ -662,6 +1481,23 @@ fn fixture_manifest() -> BatchManifest {
         imported_count: 0,
         failed_count: 0,
         rejected_count: 0,
+    }
+}
+
+fn fixture_part(index: usize, status: &str) -> BatchPart {
+    BatchPart {
+        index,
+        request_file: request_part_file_name(index),
+        request_count: 1,
+        request_bytes: 100,
+        file_id: Some(format!("file_{index}")),
+        batch_id: Some(format!("batch_{index}")),
+        status: status.to_string(),
+        output_file_id: None,
+        error_file_id: None,
+        output_file: None,
+        error_file: None,
+        failed_count: 0,
     }
 }
 
@@ -691,6 +1527,27 @@ where
                     }
                 },
                 "error": null
+            })
+        )?;
+    }
+    output.flush()?;
+    Ok(())
+}
+
+fn write_remote_error_output(path: &Path, work_items: &[serde_json::Value]) -> Result<()> {
+    let mut output = File::create(path)?;
+    for item in work_items {
+        let custom_id = item["custom_id"].as_str().context("missing custom_id")?;
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({
+                "custom_id": custom_id,
+                "response": null,
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "fixture remote batch failure"
+                }
             })
         )?;
     }

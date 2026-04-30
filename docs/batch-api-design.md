@@ -2,8 +2,8 @@
 
 Last updated: 2026-04-30
 
-This document designs a future batch translation mode for epubicus. It is a
-planning document only; no batch implementation is assumed to exist yet.
+This document describes the batch translation mode for epubicus and keeps the
+remaining hardening plan visible as implementation progresses.
 
 ## Goals
 
@@ -31,6 +31,8 @@ Each JSONL line has a unique `custom_id`, `method`, `url`, and request `body`.
 The output order is not guaranteed to match input order, so epubicus must map
 results by `custom_id`. Successful responses are available from
 `output_file_id`; failed requests are available from `error_file_id`.
+The current OpenAI per-batch input limits are 50,000 requests and 200 MB per
+input file, so epubicus splits large request sets before submission.
 
 Source references:
 
@@ -90,9 +92,16 @@ same input EPUB hash.
     batch_manifest.json
     work_items.jsonl
     requests.jsonl
+    requests.part-0001.jsonl
+    requests.part-0002.jsonl
     retry_requests.jsonl
     local_requests.jsonl
     output.jsonl
+    output.part-0001.jsonl
+    output.part-0002.jsonl
+    remote_errors.jsonl
+    remote_errors.part-0001.jsonl
+    remote_errors.part-0002.jsonl
     errors.jsonl
     rejected.jsonl
     import_report.json
@@ -202,9 +211,11 @@ Atomic file update rules:
 - JSON state files such as `batch_manifest.json`, `work_items.jsonl`,
   `import_report.json`, and `manifest.json` should be written to a temporary
   file in the same directory, flushed, and atomically renamed into place.
-- Append-only files such as `translations.jsonl` may append under lock. Duplicate
-  cache keys are allowed only if the existing translated text is identical; a
-  conflicting duplicate must be reported and must not overwrite silently.
+- Append-only files such as `translations.jsonl` may append under lock.
+  Duplicate cache keys are idempotent: identical translated text is treated as
+  already done, and a later different translation for the same key is ignored
+  while keeping the first valid cached value. A later duplicate must never
+  overwrite the existing cache entry silently.
 - `read_cache_entries` should continue treating the last valid entry for a key
   as the in-memory value only after duplicate conflict rules are defined. The
   safer batch import behavior is to check the loaded cache before appending.
@@ -213,7 +224,7 @@ Concurrent command behavior:
 
 | Scenario | Required behavior |
 |--|--|
-| Two `translate` commands for same EPUB | Both may run, but cache writes are serialized; duplicate successful keys are ignored if identical |
+| Two `translate` commands for same EPUB | A second command for the same input path is stopped by the input run lock; cache writes are still serialized for recovery and cross-command safety |
 | `translate` while `batch import` runs | Cache writes are serialized; neither process may truncate or delete cache under the other |
 | `batch status` while `batch import` runs | Status may wait for the batch lock before updating local manifest |
 | `batch prepare --clear-cache` while another process uses cache | Must wait or fail with a clear lock message; must not delete active cache |
@@ -241,6 +252,22 @@ updates and cache writes must still be serialized.
   "request_file": "requests.jsonl",
   "work_items_file": "work_items.jsonl",
   "request_count": 5798,
+  "parts": [
+    {
+      "index": 1,
+      "request_file": "requests.part-0001.jsonl",
+      "request_count": 5798,
+      "request_bytes": 1234567,
+      "file_id": null,
+      "batch_id": null,
+      "status": "prepared",
+      "output_file_id": null,
+      "error_file_id": null,
+      "output_file": null,
+      "error_file": null,
+      "failed_count": 0
+    }
+  ],
   "file_id": null,
   "batch_id": null,
   "status": "prepared",
@@ -302,6 +329,9 @@ The ledger is the basis for reporting and rerouting. A command should be able to
 select items by state and emit a new request file for either another batch or a
 local provider run.
 
+Manifest status may also be `imported_with_errors` when an import pass finished
+but one or more work items remain `failed` or `rejected`.
+
 ## Request JSONL design
 
 Use one request per uncached translation block. Long blocks that the normal path
@@ -343,7 +373,13 @@ Responsibilities:
 - Extract translatable blocks exactly like `translate`.
 - Compute glossary subset and cache key for each block.
 - Skip valid cache hits.
-- Write uncached requests to `requests.jsonl`.
+- Write uncached requests to compatibility `requests.jsonl`.
+- Write request part files such as `requests.part-0001.jsonl`; the current
+  defaults cap each part at 50,000 requests and 200,000,000 JSONL bytes.
+- Refuse a single request line that is larger than `--max-bytes-per-file`.
+- Remove stale request part, output part, remote error part, aggregate output,
+  and import report artifacts from a previous prepare/fetch/import run before
+  writing the new prepare artifacts.
 - Write all selected work items and their initial states to `work_items.jsonl`.
 - Write or update `batch_manifest.json`.
 - Print a summary: selected pages, total blocks, cached blocks, request count,
@@ -361,22 +397,25 @@ Validation:
 Responsibilities:
 
 - Read `batch_manifest.json`.
-- Upload `requests.jsonl` through Files API with `purpose=batch`.
-- Create a batch for `/v1/responses` with `completion_window: "24h"`.
-- Save `file_id`, `batch_id`, and initial status.
+- Upload each request part through Files API with `purpose=batch`.
+- Create one batch per part for `/v1/responses` with
+  `completion_window: "24h"`.
+- Save per-part `file_id`, `batch_id`, and initial status.
 
 Validation:
 
 - Refuse submit when request count is zero.
-- Refuse submit if a live `batch_id` already exists unless `--force` is used.
+- Without `--force`, keep already submitted parts and submit only parts that do
+  not yet have a `batch_id`.
+- Refuse submit if every part already has a `batch_id` unless `--force` is used.
 - Confirm the input file exists and matches the manifest.
 
 ### `batch status`
 
 Responsibilities:
 
-- Retrieve the remote batch object by `batch_id`.
-- Update local status and file IDs.
+- Retrieve each remote batch object by per-part `batch_id`.
+- Update local aggregate status, per-part status, and file IDs.
 - Print status, request counts, timestamps, and output/error file IDs when
   available.
 - Optionally print local ledger counts by state, such as `imported`,
@@ -398,9 +437,14 @@ Statuses to handle:
 Responsibilities:
 
 - Retrieve status first.
-- If `output_file_id` exists, download it to `output.jsonl`.
-- If `error_file_id` exists, download it to `errors.jsonl`.
-- Preserve previous downloads unless `--force` is used.
+- If a part `output_file_id` exists, download it to `output.part-0001.jsonl`
+  style files.
+- If a part `error_file_id` exists, download it to
+  `remote_errors.part-0001.jsonl` style files.
+- Rebuild aggregate `output.jsonl` and `remote_errors.jsonl` for import and
+  reporting compatibility.
+- Preserve existing part downloads unless `--force` is used; reruns download
+  only missing part files and rebuild aggregate files from all available parts.
 
 Notes:
 
@@ -416,10 +460,13 @@ Responsibilities:
 - Extract translated text from the response body.
 - Run the same translation validation used by normal provider responses.
 - Write valid translations to `translations.jsonl` immediately.
+- Treat identical cache hits as already imported so rerunning import is safe.
 - Update `work_items.jsonl` states as lines are imported, failed, or rejected.
 - Write invalid or refusal-like responses to `rejected.jsonl`.
-- Read `errors.jsonl` and write failed request metadata into the import report.
-- Optionally create `retry_requests.jsonl` for failed/rejected uncached items.
+- Read fetched `remote_errors.jsonl`, mark matching work items as `failed`, and
+  write failed request metadata into `errors.jsonl` and the import report.
+- `batch retry-requests` can create `retry_requests.jsonl` for failed/rejected
+  uncached items from the original request ledger.
 
 Validation:
 
@@ -461,6 +508,8 @@ Current implementation:
 - Supports `--priority page-order|failed-first|hard-first|short-first|oldest-first`.
 - Excludes items that are already imported, locally imported, or already present
   in cache from remaining selection.
+- Excludes existing `local_pending` items from `--remaining`, so rerunning the
+  same reroute command does not count already-rerouted work again.
 - Marks selected items as `local_pending`; provider execution remains in the
   separate `batch translate-local` step.
 
@@ -487,6 +536,41 @@ Current implementation:
 
 This command is intentionally separate from `batch reroute-local` so the user
 can inspect the selected work before spending local compute time.
+
+### `batch retry-requests`
+
+Responsibilities:
+
+- Select `failed` and `rejected` work items by default, or repeated
+  `--state <STATE>` values when supplied.
+- Skip selected work items whose cache key is already present.
+- Reuse the exact original request body from `requests.jsonl`.
+- Write selected request lines to `retry_requests.jsonl` without submitting
+  them.
+- Support `--limit <N>` for bounded retry planning.
+- Support `--priority page-order|failed-first|hard-first|short-first|oldest-first`
+  with the same ordering semantics as local fallback planning.
+
+### `batch run`
+
+Responsibilities:
+
+- Orchestrate the same persisted stages as the explicit subcommands:
+  `prepare -> submit -> status -> fetch -> import -> health -> verify`.
+- Resume from an existing `batch_manifest.json` instead of recreating request
+  files by default.
+- Recreate local request artifacts only when `--force-prepare` is supplied.
+- Without `--wait`, stop after status when the remote batch is not yet
+  fetchable.
+- With `--wait`, poll status every `--poll-secs <N>` seconds until the remote
+  status is `completed`, `failed`, `expired`, or `cancelled`, or until
+  `--max-wait-secs <N>` is reached.
+- Fetch and import available remote output/error files once the remote status is
+  fetchable.
+- Run `batch health` and `batch verify` after import unless `--skip-verify` is
+  supplied.
+- If `--output <PATH>` is supplied, assemble a final EPUB from the imported
+  cache using the same behavior as `translate --partial-from-cache --keep-cache`.
 
 ### `translate --partial-from-cache`
 
@@ -532,7 +616,7 @@ history.
 | Piece scheduling | Treat each block/chunk as a schedulable piece in `work_items.jsonl` | Allows retries, local rerouting, and progress reporting by item |
 | Priority queue | Sort by state, failure count, size, placeholder complexity, or page order | Avoids leaving difficult pieces until the end |
 | Endgame mode | When remaining count falls below a threshold, reroute leftovers to local or synchronous API | Avoids waiting for a long batch cycle for a few items |
-| Duplicate work absorption | If two processes produce the same cache key, accept the first valid result and ignore identical duplicates | Makes concurrent runs less wasteful and safer |
+| Duplicate work absorption | If repeated work produces the same cache key, keep the first valid result and ignore later duplicates, including different nondeterministic local-model wording | Makes resumed runs and local fallbacks less brittle |
 | Request packing limits | Split JSONL batches by request count and file size before API limits are reached | Keeps large EPUB jobs submit-safe |
 | Health summary | Show counts by state and stale age, not only remote batch status | Makes bottlenecks visible |
 
@@ -558,7 +642,7 @@ Suggested priority modes:
 | Quarantine | Put invalid outputs in `rejected.jsonl` instead of cache | Prevents bad translations from contaminating assembly |
 | Stable lock order | Always acquire batch lock before cache lock when both are needed | Avoids deadlocks |
 
-### Proposed extra commands
+### Implemented health and verification commands
 
 ```powershell
 epubicus batch health .\book.epub
@@ -566,7 +650,9 @@ epubicus batch verify .\book.epub
 epubicus batch reroute-local .\book.epub --remaining --endgame-threshold 50 --provider ollama
 ```
 
-`batch health` should print state counts and stale ages, for example:
+`batch health` prints state counts, cache-backed work, remote IDs/statuses,
+request counts, import report details, and pending age where available. A
+typical future output shape is:
 
 ```text
 items: 5798 total | imported 5200 | submitted 300 | failed 20 | rejected 5 | local_pending 10 | remaining 263
@@ -574,15 +660,15 @@ last update: 2026-04-30T09:30:12Z
 remote batch: in_progress | completed 5300/5798 | failed 20
 ```
 
-`batch verify` should rebuild expected work from the EPUB and compare it with
-cache and `work_items.jsonl`:
+`batch verify` rebuilds expected work from the EPUB and compares it with cache
+and `work_items.jsonl`:
 
 | Finding | Meaning | Suggested action |
 |--|--|--|
 | missing | Expected work item is absent from ledger and cache | Prepare or repair ledger |
 | stale | Source/prompt hash differs from ledger | Regenerate request |
 | orphaned | Ledger item no longer exists in current EPUB extraction | Ignore or prune |
-| cache_conflict | Cache key exists with conflicting translation text | Quarantine and report |
+| cache_conflict | Cache contains an impossible conflict or corrupt duplicate state | Quarantine and report |
 | invalid_cache | Cached translation no longer passes validation | Invalidate and retry |
 
 ### Endgame policy
@@ -594,8 +680,8 @@ If remaining non-imported items <= N and no active remote batch is expected to f
 reroute those items to local translation or normal synchronous provider translation.
 ```
 
-The command should show the selected item count before rerouting. Later, an
-orchestrated `batch run` command can make this automatic behind a flag.
+The command shows the selected item count before rerouting. `batch run` now
+orchestrates the normal path, but endgame rerouting is still explicit.
 
 ## Integration with existing cache
 
@@ -684,7 +770,8 @@ Exit criteria:
 
 Deliverables:
 
-- `batch submit` uploads the JSONL file and creates the batch.
+- `batch submit` uploads request part JSONL files and creates one remote batch
+  per part.
 - `batch status` retrieves and persists remote status.
 - `batch fetch` downloads output and error files. The local output file is
   `output.jsonl`; the remote error download is `remote_errors.jsonl` so it does
@@ -728,11 +815,12 @@ Deliverables:
   `work_items.jsonl` in read-only mode. It reports `missing`, `stale`,
   `orphaned`, `cache_conflict`, and `invalid_cache` counts.
 - README examples.
-- Import report with counts for imported, failed, rejected, duplicate, and
-  already-cached items.
+- Import report with counts for imported, already-cached, failed, rejected, and
+  duplicate/error items.
 - Priority selection for retry/local routing, such as `failed-first`,
   `hard-first`, `short-first`, and `page-order`.
-- Optional `batch run` orchestration command.
+- `batch run` orchestration command for resume-friendly
+  prepare/submit/status/fetch/import/health/verify.
 
 Exit criteria:
 
@@ -765,6 +853,8 @@ Exit criteria:
   parent record?
 - Should import require exact manifest provider/model/glossary match by default?
 - Should `batch run` wait and poll, or should it stop after submit?
+  - Implemented as both modes: by default it stops when the remote batch is
+    still running; `--wait` polls until a fetchable terminal state.
 - Should rejected items be eligible for automatic Ollama fallback during import,
   or only through a separate explicit command?
 - Should `batch translate-local` reuse adaptive concurrency for local providers,

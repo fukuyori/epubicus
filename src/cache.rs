@@ -173,12 +173,10 @@ impl CacheStore {
             if existing == &record.translated {
                 self.entries
                     .insert(record.key.clone(), record.translated.clone());
-                return Ok(());
+            } else {
+                self.entries.insert(record.key.clone(), existing.clone());
             }
-            bail!(
-                "cache key conflict for {}; existing translation differs from new translation",
-                record.key
-            );
+            return Ok(());
         }
         let mut file = OpenOptions::new()
             .create(true)
@@ -447,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_cache_insert_rejects_conflicting_translation() -> Result<()> {
+    fn duplicate_cache_insert_keeps_existing_translation_on_conflict() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let input = dir.path().join("book.epub");
         fs::write(&input, b"dummy")?;
@@ -456,8 +454,12 @@ mod tests {
         first.insert(record("abc", "訳文A"))?;
 
         let mut second = CacheStore::from_args(&input, &args)?;
-        let err = second.insert(record("abc", "訳文B")).unwrap_err();
-        assert!(err.to_string().contains("cache key conflict"));
+        second.insert(record("abc", "訳文B"))?;
+
+        let entries = read_cache_entries(&first.translations_path)?;
+        assert_eq!(entries.get("abc").map(String::as_str), Some("訳文A"));
+        assert_eq!(second.entries.get("abc").map(String::as_str), Some("訳文A"));
+        assert_eq!(second.stats.writes, 0);
         Ok(())
     }
 

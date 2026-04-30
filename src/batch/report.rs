@@ -53,6 +53,13 @@ pub(super) fn collect_batch_health(args: &BatchHealthArgs) -> Result<BatchHealth
     let error_file_count = count_jsonl_lines(&batch_dir.join(ERRORS_FILE))?;
     let import_report = read_optional_json::<ImportReport>(&batch_dir.join(IMPORT_REPORT_FILE))?;
 
+    let mut part_status_counts = BTreeMap::new();
+    if let Some(manifest) = &manifest {
+        for part in &manifest.parts {
+            *part_status_counts.entry(part.status.clone()).or_insert(0) += 1;
+        }
+    }
+
     let mut state_counts = BTreeMap::new();
     let mut cache_backed_items = 0usize;
     let mut oldest_pending_at = None::<String>;
@@ -61,7 +68,7 @@ pub(super) fn collect_batch_health(args: &BatchHealthArgs) -> Result<BatchHealth
         if cache.peek(&item.cache_key).is_some() {
             cache_backed_items += 1;
         }
-        if item.state != "imported" {
+        if !is_completed_item_state(&item.state) {
             oldest_pending_at = match oldest_pending_at {
                 Some(ref current) if current <= &item.updated_at => oldest_pending_at,
                 _ => Some(item.updated_at.clone()),
@@ -90,6 +97,7 @@ pub(super) fn collect_batch_health(args: &BatchHealthArgs) -> Result<BatchHealth
             .as_ref()
             .and_then(|manifest| manifest.output_file.clone()),
         manifest_failed_count: manifest.as_ref().map(|manifest| manifest.failed_count),
+        manifest_part_status_counts: part_status_counts,
         request_count,
         work_item_count: work_items.len(),
         state_counts,
@@ -122,6 +130,12 @@ fn print_batch_health(health: &BatchHealth) {
     if let Some(failed_count) = health.manifest_failed_count {
         println!("remote failed requests: {failed_count}");
     }
+    if !health.manifest_part_status_counts.is_empty() {
+        println!("remote parts:");
+        for (status, count) in &health.manifest_part_status_counts {
+            println!("  {status}: {count}");
+        }
+    }
     if let Some(output_file) = &health.manifest_output_file {
         println!("output file: {output_file}");
     }
@@ -150,8 +164,11 @@ fn print_batch_health(health: &BatchHealth) {
     println!("error lines: {}", health.error_file_count);
     if let Some(report) = &health.import_report {
         println!(
-            "last import: {} imported | {} rejected | {} error(s)",
-            report.imported_count, report.rejected_count, report.error_count
+            "last import: {} imported | {} already cached | {} rejected | {} error(s)",
+            report.imported_count,
+            report.already_cached_count,
+            report.rejected_count,
+            report.error_count
         );
     }
     if let Some(oldest) = &health.oldest_pending_at {
@@ -160,6 +177,10 @@ fn print_batch_health(health: &BatchHealth) {
             println!("oldest pending age: {}", format_duration_secs(age_secs));
         }
     }
+}
+
+fn is_completed_item_state(state: &str) -> bool {
+    matches!(state, "imported" | "local_imported" | "cached" | "skipped")
 }
 
 fn age_since_rfc3339_secs(value: &str) -> Option<i64> {
@@ -307,15 +328,16 @@ pub(super) fn collect_batch_verify(args: &BatchVerifyArgs) -> Result<BatchVerify
         }
 
         let cached = cache.peek(&item.cache_key);
-        if item.state == "imported" && cached.is_none() {
+        let cache_backed_state = matches!(item.state.as_str(), "imported" | "local_imported");
+        if cache_backed_state && cached.is_none() {
             cache_conflict.push(VerifyFinding::from_work_item(
                 item,
-                "state is imported but cache entry is missing",
+                "state is cache-backed but cache entry is missing",
             ));
-        } else if item.state != "imported" && cached.is_some() {
+        } else if !cache_backed_state && cached.is_some() {
             cache_conflict.push(VerifyFinding::from_work_item(
                 item,
-                "cache entry exists but state is not imported",
+                "cache entry exists but state is not cache-backed",
             ));
         }
         if let Some(translated) = cached {

@@ -5,6 +5,12 @@ pub(super) struct PreparedItem {
     pub(super) request: BatchRequestLine,
 }
 
+pub(super) struct BatchPartPlan {
+    pub(super) part: BatchPart,
+    pub(super) start: usize,
+    pub(super) end: usize,
+}
+
 #[derive(Debug)]
 pub(super) struct BatchHealth {
     pub(super) input_hash: String,
@@ -16,6 +22,7 @@ pub(super) struct BatchHealth {
     pub(super) manifest_error_file_id: Option<String>,
     pub(super) manifest_output_file: Option<String>,
     pub(super) manifest_failed_count: Option<usize>,
+    pub(super) manifest_part_status_counts: BTreeMap<String, usize>,
     pub(super) request_count: usize,
     pub(super) work_item_count: usize,
     pub(super) state_counts: BTreeMap<String, usize>,
@@ -83,6 +90,8 @@ pub(super) struct BatchManifest {
     pub(super) request_file: String,
     pub(super) work_items_file: String,
     pub(super) request_count: usize,
+    #[serde(default)]
+    pub(super) parts: Vec<BatchPart>,
     pub(super) file_id: Option<String>,
     pub(super) batch_id: Option<String>,
     pub(super) status: String,
@@ -93,6 +102,22 @@ pub(super) struct BatchManifest {
     pub(super) imported_count: usize,
     pub(super) failed_count: usize,
     pub(super) rejected_count: usize,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct BatchPart {
+    pub(super) index: usize,
+    pub(super) request_file: String,
+    pub(super) request_count: usize,
+    pub(super) request_bytes: usize,
+    pub(super) file_id: Option<String>,
+    pub(super) batch_id: Option<String>,
+    pub(super) status: String,
+    pub(super) output_file_id: Option<String>,
+    pub(super) error_file_id: Option<String>,
+    pub(super) output_file: Option<String>,
+    pub(super) error_file: Option<String>,
+    pub(super) failed_count: usize,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -114,7 +139,7 @@ pub(super) struct WorkItem {
     pub(super) updated_at: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct BatchRequestLine {
     pub(super) custom_id: String,
     pub(super) method: String,
@@ -122,7 +147,7 @@ pub(super) struct BatchRequestLine {
     pub(super) body: BatchResponsesBody,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct BatchResponsesBody {
     pub(super) model: String,
     pub(super) instructions: String,
@@ -178,6 +203,8 @@ pub(super) struct ImportErrorLine {
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct ImportReport {
     pub(super) imported_count: usize,
+    #[serde(default)]
+    pub(super) already_cached_count: usize,
     pub(super) rejected_count: usize,
     pub(super) error_count: usize,
     pub(super) output_file: String,

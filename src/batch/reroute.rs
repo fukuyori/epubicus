@@ -216,7 +216,7 @@ fn is_finished_item(item: &WorkItem, cache: &CacheStore) -> bool {
         || cache.peek(&item.cache_key).is_some()
 }
 
-fn prioritized_indices(work_items: &[WorkItem], priority: BatchPriority) -> Vec<usize> {
+pub(super) fn prioritized_indices(work_items: &[WorkItem], priority: BatchPriority) -> Vec<usize> {
     let mut indices = (0..work_items.len()).collect::<Vec<_>>();
     indices.sort_by(|left, right| {
         let left_item = &work_items[*left];

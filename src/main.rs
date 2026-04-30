@@ -58,8 +58,8 @@ use prompt::retry_user_prompt;
 use prompt::{system_prompt, user_prompt};
 #[cfg(test)]
 use translator::{
-    ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD, AdaptiveConcurrency, Translation, cache_key,
-    is_refusal_validation_error, placeholder_signature, validate_translation_response,
+    ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD, AdaptiveConcurrency, PROMPT_VERSION, Translation,
+    cache_key, is_refusal_validation_error, placeholder_signature, validate_translation_response,
 };
 use translator::{Translator, split_translation_chunks};
 #[cfg(test)]
@@ -67,7 +67,9 @@ use usage::ClaudeUsage;
 #[cfg(test)]
 use usage::{ClaudeResponse, usage_from_claude_response, usage_from_openai_value};
 #[cfg(test)]
-use xhtml::{Token, restore_inline_or_original, tokenize_placeholders, write_events};
+use xhtml::{
+    Token, restore_inline_or_original, tokenize_placeholders, try_restore_inline, write_events,
+};
 use xhtml::{collect_element_inner, encode_inline, translate_xhtml_file};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +99,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn translate_command(args: TranslateArgs) -> Result<()> {
+pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     let _run_lock = acquire_input_run_lock(&args.input, "translate input EPUB")?;
     let output = args
         .output
@@ -157,6 +159,12 @@ fn translate_command(args: TranslateArgs) -> Result<()> {
     );
     if let Some(summary) = translator.api_usage_summary() {
         eprintln!("API usage: {summary}");
+    }
+    if partial_from_cache && translator.cache.stats.misses > 0 {
+        eprintln!(
+            "warning: partial output contains {} cache miss(es); unchanged source text may remain. Run batch verify/health or fill the missing items before final use.",
+            translator.cache.stats.misses
+        );
     }
     if translator.fallback_count > 0 {
         eprintln!("Fallback translations: {}", translator.fallback_count);
@@ -619,6 +627,39 @@ mod tests {
     }
 
     #[test]
+    fn inline_restore_keeps_citation_markup_in_localized_bibliography() -> Result<()> {
+        let source = br##"<li>Beston, H. B., <cite>The Firelight Fairy Book</cite>.</li>"##;
+        let mut reader = Reader::from_reader(Cursor::new(source));
+        reader.config_mut().trim_text(false);
+        let mut buf = Vec::new();
+        let inner = loop {
+            match reader.read_event_into(&mut buf)? {
+                Event::Start(e) if local_name(e.name().as_ref()) == b"li" => {
+                    let end_name = e.name().as_ref().to_vec();
+                    break collect_element_inner(&mut reader, &end_name)?;
+                }
+                Event::Eof => bail!("missing test list item"),
+                _ => {}
+            }
+            buf.clear();
+        };
+        let (_, inline_map) = encode_inline(&inner)?;
+        let restored = try_restore_inline(
+            "Beston, H. B.\u{3001}⟦E1⟧The Firelight Fairy Book⟦/E1⟧。",
+            &inline_map,
+        )?;
+
+        let mut writer = Writer::new(Vec::new());
+        write_events(&mut writer, &restored)?;
+        let restored_text = String::from_utf8(writer.into_inner())?;
+        assert_eq!(
+            restored_text,
+            "Beston, H. B.、<cite>The Firelight Fairy Book</cite>。"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn aside_is_translatable_block() {
         assert!(is_block_tag(QName(b"aside")));
     }
@@ -865,6 +906,41 @@ mod tests {
     }
 
     #[test]
+    fn translation_validation_accepts_localized_citation_line() -> Result<()> {
+        validate_translation_response(
+            "Beston, H. B., ⟦E1⟧The Firelight Fairy Book⟦/E1⟧.",
+            "Beston, H. B.、⟦E1⟧The Firelight Fairy Book⟦/E1⟧。",
+        )
+    }
+
+    #[test]
+    fn translation_validation_rejects_long_partial_english_segment() {
+        let source = "Wide range of the modern fairy tale. The bibliography will suggest something of the treasures in the field of the modern fanciful story. From the delightful nonsense of Alice in Wonderland and the travelers' tales of Baron Munchausen to the profound seriousness of The King of the Golden River is a far cry.";
+        let translated = "近代童話の広い範囲。The bibliography will suggest something of the treasures in the field of the modern fanciful story. From the delightful nonsense of Alice in Wonderland and the travelers' tales of Baron Munchausen to the profound seriousness of The King of the Golden River is a far cry.";
+
+        let err = validate_translation_response(source, translated).unwrap_err();
+        assert!(err.to_string().contains("untranslated English segment"));
+    }
+
+    #[test]
+    fn translation_validation_rejects_medium_partial_english_segment() {
+        let source = "She seized the keys of the boxes, and first opened the box of gold. But how great was her terror when she gazed at its contents.";
+        let translated =
+            "彼女は箱の鍵をつかんだ。But how great was her terror when she gazed at its contents.";
+
+        let err = validate_translation_response(source, translated).unwrap_err();
+        assert!(err.to_string().contains("untranslated English segment"));
+    }
+
+    #[test]
+    fn translation_validation_allows_short_ascii_names_in_japanese_text() -> Result<()> {
+        validate_translation_response(
+            "Dr. Abram S. Isaacs is a professor in New York University and is also a rabbi.",
+            "アブラハム・S・アイザックス博士はNew York Universityの教授であり、またラビである。",
+        )
+    }
+
+    #[test]
     fn refusal_validation_errors_are_classified_for_fallback() {
         let err = validate_translation_response(
             "This paragraph should be translated into Japanese.",
@@ -985,7 +1061,7 @@ mod tests {
         let params = ManifestParams {
             provider: "ollama".to_string(),
             model: DEFAULT_MODEL.to_string(),
-            prompt_version: "v1".to_string(),
+            prompt_version: PROMPT_VERSION.to_string(),
             style_id: "essay".to_string(),
             glossary_sha: String::new(),
         };

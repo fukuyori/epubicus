@@ -30,7 +30,11 @@ pub(super) fn collect_page_work_items(
                     let glossary_subset = glossary_subset(glossary, &source_text);
                     let cache_key =
                         cache_key(provider, model, style, &source_text, &glossary_subset);
-                    if skip_cached && cache.peek(&cache_key).is_some() {
+                    if skip_cached
+                        && cache.peek(&cache_key).is_some_and(|translated| {
+                            validate_translation_response(&source_text, translated).is_ok()
+                        })
+                    {
                         continue;
                     }
                     let system = system_prompt(style);

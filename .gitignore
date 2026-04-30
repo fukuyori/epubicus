@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target
 /target-*
+/target-runs/
 
 # Cargo
 Cargo.lock.bak
@@ -20,6 +21,12 @@ desktop.ini
 
 # epubicus runtime artifacts (test inputs and outputs that shouldn't be tracked)
 *.cache/
+.*.cache/
+/*-cache/
+/.local-*-cache/
+/.batch-*/
+/.batch-*-cache/
+/book.epub.cache/
 *.ja.epub
 *.partial-ja.epub
 glossary.json
@@ -32,6 +39,14 @@ epubicus.toml
 .env
 .env.*
 !.env.example
+/scripts/local-ollama-env.ps1
+/scripts/local-ollama-env.sh
+/scripts/openai-env.ps1
+/scripts/openai-env.sh
+/scripts/openai-batch-env.ps1
+/scripts/openai-batch-env.sh
+/scripts/claude-env.ps1
+/scripts/claude-env.sh
 
 # Sample / test EPUB files dropped at the project root
 /book.epub

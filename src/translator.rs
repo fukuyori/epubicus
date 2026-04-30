@@ -29,6 +29,7 @@ use crate::{
 };
 
 pub(crate) const ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD: usize = 20;
+pub(crate) const PROMPT_VERSION: &str = "v2";
 
 #[derive(Clone)]
 pub(crate) struct TranslationBackend {
@@ -386,7 +387,7 @@ impl Translator {
         ManifestParams {
             provider: self.backend.provider.to_string(),
             model: self.backend.model.clone(),
-            prompt_version: "v1".to_string(),
+            prompt_version: PROMPT_VERSION.to_string(),
             style_id: self.backend.style.clone(),
             glossary_sha: glossary_sha(&self.backend.glossary),
         }
@@ -926,6 +927,11 @@ pub(crate) fn validate_translation_response(source: &str, translated: &str) -> R
             "translation validation failed: provider response does not appear to contain Japanese text"
         );
     }
+    if likely_contains_untranslated_english_segment(source, translated) {
+        bail!(
+            "translation validation failed: provider response still contains a long untranslated English segment"
+        );
+    }
     if likely_truncated_translation(source, translated) {
         bail!("translation validation failed: provider response appears to be truncated");
     }
@@ -985,10 +991,49 @@ fn likely_untranslated_english(source: &str, translated: &str) -> bool {
     if japanese_char_count(translated) > 0 {
         return false;
     }
+    if looks_like_localized_citation_line(source, translated) {
+        return false;
+    }
     let source_words = ascii_word_count(source);
     let translated_words = ascii_word_count(translated);
     source_words >= 3 && translated_words >= 3
         || ascii_letter_count(source) >= 24 && ascii_letter_count(translated) >= 12
+}
+
+fn likely_contains_untranslated_english_segment(source: &str, translated: &str) -> bool {
+    if japanese_char_count(translated) == 0 {
+        return false;
+    }
+    if ascii_word_count(source) < 8 {
+        return false;
+    }
+    longest_ascii_text_run(translated)
+        .is_some_and(|run| ascii_word_count(&run) >= 7 && ascii_letter_count(&run) >= 45)
+}
+
+fn longest_ascii_text_run(text: &str) -> Option<String> {
+    let mut best = String::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphabetic()
+            || ch.is_ascii_whitespace()
+            || matches!(
+                ch,
+                '\'' | '"' | ',' | '.' | ';' | ':' | '?' | '!' | '-' | '(' | ')'
+            )
+        {
+            current.push(ch);
+        } else {
+            if ascii_letter_count(&current) > ascii_letter_count(&best) {
+                best = current.trim().to_string();
+            }
+            current.clear();
+        }
+    }
+    if ascii_letter_count(&current) > ascii_letter_count(&best) {
+        best = current.trim().to_string();
+    }
+    (!best.is_empty()).then_some(best)
 }
 
 fn ascii_word_count(text: &str) -> usize {
@@ -1013,6 +1058,14 @@ fn japanese_char_count(text: &str) -> usize {
             )
         })
         .count()
+}
+
+fn looks_like_localized_citation_line(source: &str, translated: &str) -> bool {
+    !placeholder_signature(source).is_empty()
+        && normalize_for_comparison(source) != normalize_for_comparison(translated)
+        && translated
+            .chars()
+            .any(|ch| matches!(ch, '、' | '。' | '『' | '』' | '「' | '」'))
 }
 
 fn looks_like_refusal_or_explanation(text: &str) -> bool {
@@ -1130,6 +1183,8 @@ pub(crate) fn cache_key(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"epubicus-cache-v1\n");
+    hasher.update(PROMPT_VERSION.as_bytes());
+    hasher.update(b"\n");
     hasher.update(provider.to_string().as_bytes());
     hasher.update(b"\n");
     hasher.update(model.as_bytes());

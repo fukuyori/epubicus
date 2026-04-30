@@ -11,6 +11,8 @@ pub(crate) const DEFAULT_CLAUDE_BASE_URL: &str = "https://api.anthropic.com/v1";
 pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub(crate) const DEFAULT_MAX_CHARS_PER_REQUEST: usize = 3500;
 pub(crate) const DEFAULT_CONCURRENCY: usize = 1;
+pub(crate) const DEFAULT_BATCH_MAX_REQUESTS_PER_FILE: usize = 50_000;
+pub(crate) const DEFAULT_BATCH_MAX_BYTES_PER_FILE: usize = 200_000_000;
 
 #[derive(Parser)]
 #[command(name = "epubicus")]
@@ -291,13 +293,17 @@ pub(crate) struct BatchArgs {
 pub(crate) enum BatchCommand {
     /// Prepare local Batch API request files without submitting them.
     Prepare(BatchPrepareArgs),
+    /// Prepare, submit, wait optionally, fetch, import, and verify a batch.
+    Run(BatchRunArgs),
+    /// Write retry_requests.jsonl for failed or rejected batch items.
+    RetryRequests(BatchRetryArgs),
     /// Import a local Batch API output JSONL file into the translation cache.
     Import(BatchImportArgs),
     /// Show local batch workspace, item, and cache state.
     Health(BatchHealthArgs),
     /// Verify local batch artifacts against the current EPUB and cache.
     Verify(BatchVerifyArgs),
-    /// Upload requests.jsonl and create a remote OpenAI batch.
+    /// Upload request part files and create remote OpenAI batches.
     Submit(BatchSubmitArgs),
     /// Refresh remote OpenAI batch status into the local manifest.
     Status(BatchStatusArgs),
@@ -319,6 +325,70 @@ pub(crate) struct BatchPrepareArgs {
     /// Last spine page to include, 1-based and inclusive.
     #[arg(long)]
     pub(crate) to: Option<usize>,
+    /// Maximum request lines per Batch API input file.
+    #[arg(long, default_value_t = DEFAULT_BATCH_MAX_REQUESTS_PER_FILE)]
+    pub(crate) max_requests_per_file: usize,
+    /// Maximum JSONL bytes per Batch API input file.
+    #[arg(long, default_value_t = DEFAULT_BATCH_MAX_BYTES_PER_FILE)]
+    pub(crate) max_bytes_per_file: usize,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchRunArgs {
+    /// Input EPUB.
+    pub(crate) input: PathBuf,
+    /// First spine page to include, 1-based.
+    #[arg(long)]
+    pub(crate) from: Option<usize>,
+    /// Last spine page to include, 1-based and inclusive.
+    #[arg(long)]
+    pub(crate) to: Option<usize>,
+    /// Maximum request lines per Batch API input file.
+    #[arg(long, default_value_t = DEFAULT_BATCH_MAX_REQUESTS_PER_FILE)]
+    pub(crate) max_requests_per_file: usize,
+    /// Maximum JSONL bytes per Batch API input file.
+    #[arg(long, default_value_t = DEFAULT_BATCH_MAX_BYTES_PER_FILE)]
+    pub(crate) max_bytes_per_file: usize,
+    /// Recreate local request artifacts before submitting.
+    #[arg(long)]
+    pub(crate) force_prepare: bool,
+    /// Poll until the remote batch reaches a fetchable terminal state.
+    #[arg(long)]
+    pub(crate) wait: bool,
+    /// Seconds between status polls when --wait is set.
+    #[arg(long, default_value_t = 60)]
+    pub(crate) poll_secs: u64,
+    /// Maximum seconds to wait before exiting. Defaults to no limit.
+    #[arg(long)]
+    pub(crate) max_wait_secs: Option<u64>,
+    /// Overwrite existing fetched output/error files.
+    #[arg(long)]
+    pub(crate) force_fetch: bool,
+    /// Skip batch verify after import.
+    #[arg(long)]
+    pub(crate) skip_verify: bool,
+    /// Assemble an EPUB from the imported cache after the batch finishes.
+    #[arg(short, long)]
+    pub(crate) output: Option<PathBuf>,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchRetryArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    /// Select items currently in this state. Defaults to failed and rejected.
+    #[arg(long = "state")]
+    pub(crate) states: Vec<String>,
+    /// Maximum number of retry requests to write.
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
+    /// Selection priority for retry request planning.
+    #[arg(long, value_enum, default_value_t = BatchPriority::PageOrder)]
+    pub(crate) priority: BatchPriority,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }

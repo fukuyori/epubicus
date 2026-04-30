@@ -41,7 +41,9 @@ Tasks:
   cache lock.
 - Add duplicate cache-key handling:
   - identical translated text: accept as already done
-  - conflicting translated text: reject and report
+  - different translated text for the same key: keep the first valid cached
+    value and ignore the later duplicate so nondeterministic retry output does
+    not break resume
 - Add atomic JSON state writer for manifest-like files.
 - Add tests for lock acquisition, lock release, wait timeout, stale-lock
   detection, duplicate cache insert, and atomic write.
@@ -53,6 +55,14 @@ Verification:
 - Cache deletion refuses or waits while another process holds the cache lock.
 - A stale lock is reported with holder metadata and is not broken unless the
   explicit recovery option is used.
+
+Current coverage:
+
+- Duplicate cache inserts keep the existing translation instead of overwriting
+  or failing the run.
+- Cache writes are serialized by the cache lock.
+- Input EPUB processing is guarded by an input run lock with explicit
+  `unlock` recovery.
 
 Exit criteria:
 
@@ -156,8 +166,7 @@ Tasks:
   - remaining count (partly visible through state counts)
   - last updated timestamp (oldest pending update and age implemented)
   - cache count (implemented as cache-backed work item count)
-  - stale item count (covered by `batch verify`; thresholded health warning is
-    planned)
+  - stale item count (covered by `batch verify`)
 - `batch verify` compares:
   - current EPUB extraction (implemented)
   - `work_items.jsonl` (implemented)
@@ -196,23 +205,29 @@ Goal: add the OpenAI Batch API network path.
 Tasks:
 
 - Implement `batch submit`. Done.
-- Upload `requests.jsonl` with `purpose=batch`. Done.
+- Upload request part JSONL files with `purpose=batch`. Done. A compatibility
+  `requests.jsonl` is still written locally for inspection and fixture use.
 - Create batch with:
   - endpoint `/v1/responses` (implemented)
   - `completion_window: "24h"` (implemented)
 - Persist:
-  - `file_id` (implemented)
-  - `batch_id` (implemented)
+  - per-part `file_id` (implemented)
+  - per-part `batch_id` (implemented)
   - remote status (implemented)
 - Implement `batch status`. Done.
 - Implement `batch fetch`. Done.
 - Download:
-  - `output_file_id` -> `output.jsonl` (implemented)
-  - `error_file_id` -> `remote_errors.jsonl` (implemented)
+  - per-part `output_file_id` -> `output.part-0001.jsonl` style files
+    (implemented)
+  - per-part `error_file_id` -> `remote_errors.part-0001.jsonl` style files
+    (implemented)
+  - aggregate `output.jsonl` and `remote_errors.jsonl` rebuilt from part files
+    (implemented)
 - `batch import` defaults to the fetched `output.jsonl`; `--output <PATH>`
   remains available for fixture or manually downloaded output.
-- Make submit/status/fetch safe to rerun. Done for status/fetch; submit refuses
-  an existing batch id unless `--force` is set.
+- Make submit/status/fetch safe to rerun. Done for status/fetch; submit resumes
+  unsubmitted parts and refuses an already fully submitted manifest unless
+  `--force` is set.
 - Reuse existing OpenAI API key handling. Done for `OPENAI_API_KEY`,
   `--openai-api-key`, and `--prompt-api-key`.
 
@@ -240,12 +255,16 @@ Tasks:
   `local_pending`.
 - Implement `batch translate-local`. Done for `local_pending` items through the
   normal provider backend.
+- Implement `batch retry-requests`. Done for writing `retry_requests.jsonl` from
+  failed/rejected uncached items without submitting them.
 - Selection modes:
   - `--state failed` (implemented for arbitrary repeated `--state`)
   - `--state rejected` (implemented)
   - `--remaining` (implemented)
   - `--endgame-threshold N` (implemented)
   - `--limit N` (implemented)
+  - `--priority page-order|failed-first|hard-first|short-first|oldest-first`
+    (implemented for reroute, local translation, and retry request planning)
 - Mark selected items as `local_pending`. Done.
 - Translate `local_pending` through existing backend, usually Ollama. Done.
 - Write successful local results to cache immediately. Done.
@@ -256,11 +275,16 @@ Verification:
 
 - Failed/rejected fixtures can be rerouted and imported locally.
 - `--remaining` excludes already imported/cached/skipped items.
+- Re-running `--remaining` does not reselect existing `local_pending` items.
 - Local translation failures keep state and `last_error`.
 - Unit coverage:
   - `batch_reroute_local_marks_selected_state`
   - `batch_reroute_local_respects_endgame_threshold`
   - `batch_reroute_local_short_first_honors_limit`
+  - `batch_reroute_local_remaining_can_be_rerun`
+  - `batch_retry_requests_defaults_to_failed_and_rejected_items`
+  - `batch_retry_requests_honors_state_limit_and_cache_skip`
+  - `batch_retry_requests_short_first_honors_limit`
   - `batch_translate_local_marks_cached_pending_items_imported`
 
 Exit criteria:
@@ -307,28 +331,67 @@ Goal: make batch mode safe for large EPUBs and repeated interruptions.
 
 Tasks:
 
-- Split request JSONL before API size/request limits.
+- Split request JSONL before API size/request limits. Done for request-count
+  based splitting with `--max-requests-per-file` and byte-count based splitting
+  with `--max-bytes-per-file`.
 - Support multiple batch parts:
-  - `batch_part_0001`
-  - `batch_part_0002`
-- Track per-part remote IDs and statuses.
+  - `requests.part-0001.jsonl` (implemented)
+  - `requests.part-0002.jsonl` (implemented)
+- Track per-part remote IDs and statuses. Implemented in manifest `parts`.
+- Submit/status/fetch per part. Implemented.
+- Rebuild aggregate `output.jsonl` and `remote_errors.jsonl` from fetched part
+  files. Implemented.
 - Add recovery tests for interrupted:
-  - prepare
-  - submit
-  - fetch
-  - import
+  - prepare (rerun removes stale part/output/import artifacts)
+  - submit (partial submitted part selection implemented)
+  - fetch (existing part files are reused; missing parts are selected)
+  - import (rerun after successful import and cache-ahead-of-ledger recovery
+    implemented)
   - reroute-local
 - Add stress tests for concurrent:
   - `translate`
-  - `batch import`
-  - `batch status`
-  - `batch verify`
+  - `batch import` / `batch verify` lock contention (lock primitive coverage
+    added)
+  - `batch status` / health visibility for multi-part status counts (health
+    coverage added)
+- Add resume-friendly orchestration:
+  - `batch run` prepares and submits when needed, otherwise resumes from the
+    existing manifest.
+  - Without `--wait`, it exits after status if the remote batch is still
+    running.
+  - With `--wait`, it polls until a fetchable terminal status and then runs
+    fetch/import/health/verify.
+  - With `--output <PATH>`, it assembles the final EPUB from the imported cache.
 
 Verification:
 
-- Multi-part fixture imports correctly.
+- Multi-part fixture imports correctly through aggregate output.
+- Unit coverage:
+  - `batch_prepare_splits_request_parts_by_request_count`
+  - `batch_prepare_splits_request_parts_by_byte_count`
+  - `batch_prepare_rejects_single_request_over_byte_limit`
+  - `batch_prepare_rerun_removes_stale_part_and_output_artifacts`
+  - `batch_import_reads_assembled_multi_part_output`
+  - `batch_import_marks_remote_error_lines_failed`
+  - `batch_import_accepts_remote_errors_without_output_file`
+  - `batch_reroute_local_can_select_remote_failed_items`
+  - `batch_import_can_be_rerun_after_success`
+  - `batch_import_recovers_cache_ahead_of_ledger`
+  - `batch_part_status_aggregation_is_stable`
+  - `batch_submit_resume_selects_only_unsubmitted_parts`
+  - `batch_submit_resume_refuses_when_every_part_submitted_without_force`
+  - `batch_and_cache_locks_are_exclusive_in_stable_order`
+  - `batch_health_reports_remote_manifest_and_pending_age`
+  - `batch_health_excludes_local_imported_from_pending_age`
+  - `batch_verify_accepts_local_imported_cache_entries`
+  - `batch_fetch_resume_skips_existing_part_files`
+  - `batch_fetch_force_redownloads_existing_part_files`
+  - `batch_run_fetchable_statuses_are_terminal`
+  - `batch_run_submit_detection_respects_parts`
 - Concurrent commands cannot corrupt cache or ledger.
-- Interrupted import can be re-run safely.
+- Interrupted import can be re-run safely. Covered for rerun after successful
+  import and the crash-like case where cache writes already landed but the
+  local ledger was not updated yet.
 
 Exit criteria:
 
