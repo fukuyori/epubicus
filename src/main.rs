@@ -914,6 +914,14 @@ mod tests {
     }
 
     #[test]
+    fn translation_validation_accepts_unchanged_reference_number_list() -> Result<()> {
+        validate_translation_response(
+            "⟦E1⟧73–80⟦/E1⟧, ⟦E2⟧86⟦/E2⟧, ⟦E3⟧91⟦/E3⟧",
+            "⟦E1⟧73–80⟦/E1⟧, ⟦E2⟧86⟦/E2⟧, ⟦E3⟧91⟦/E3⟧",
+        )
+    }
+
+    #[test]
     fn translation_validation_rejects_long_partial_english_segment() {
         let source = "Wide range of the modern fairy tale. The bibliography will suggest something of the treasures in the field of the modern fanciful story. From the delightful nonsense of Alice in Wonderland and the travelers' tales of Baron Munchausen to the profound seriousness of The King of the Golden River is a far cry.";
         let translated = "近代童話の広い範囲。The bibliography will suggest something of the treasures in the field of the modern fanciful story. From the delightful nonsense of Alice in Wonderland and the travelers' tales of Baron Munchausen to the profound seriousness of The King of the Golden River is a far cry.";

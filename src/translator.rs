@@ -914,6 +914,7 @@ pub(crate) fn validate_translation_response(source: &str, translated: &str) -> R
     validate_placeholder_tokens(source, translated)?;
     if is_meaningful_english(source)
         && normalize_for_comparison(source) == normalize_for_comparison(translated)
+        && !looks_like_reference_number_list(source)
     {
         bail!("translation validation failed: provider returned the source text unchanged");
     }
@@ -985,6 +986,40 @@ fn normalize_for_comparison(text: &str) -> String {
 
 fn is_meaningful_english(text: &str) -> bool {
     ascii_letter_count(text) >= 6
+}
+
+fn looks_like_reference_number_list(text: &str) -> bool {
+    if placeholder_signature(text).is_empty() {
+        return false;
+    }
+    let visible = tokenize_placeholders(text)
+        .into_iter()
+        .filter_map(|token| match token {
+            Token::Text(text) => Some(text),
+            Token::Open(_) | Token::Close(_) | Token::SelfClose(_) => None,
+        })
+        .collect::<String>();
+    visible.chars().any(|ch| ch.is_ascii_digit())
+        && visible.chars().all(|ch| {
+            ch.is_ascii_digit()
+                || ch.is_whitespace()
+                || matches!(
+                    ch,
+                    ',' | '.'
+                        | ';'
+                        | ':'
+                        | '-'
+                        | '\u{2010}'
+                        | '\u{2011}'
+                        | '\u{2012}'
+                        | '\u{2013}'
+                        | '\u{2014}'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                )
+        })
 }
 
 fn likely_untranslated_english(source: &str, translated: &str) -> bool {

@@ -1,6 +1,6 @@
 [package]
 name = "epubicus"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 authors = ["fukuyori <self@spumoni.org>"]
 description = "Translate English EPUB files to Japanese with local Ollama (or OpenAI / Claude), preserving inline formatting"
