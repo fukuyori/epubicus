@@ -14,6 +14,7 @@ pub(crate) const DEFAULT_CONCURRENCY: usize = 1;
 
 #[derive(Parser)]
 #[command(name = "epubicus")]
+#[command(version)]
 #[command(about = "Translate English EPUB files to Japanese with Ollama, OpenAI, or Claude")]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -130,6 +131,27 @@ pub(crate) enum Provider {
     Ollama,
     Openai,
     Claude,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum BatchPriority {
+    PageOrder,
+    FailedFirst,
+    HardFirst,
+    ShortFirst,
+    OldestFirst,
+}
+
+impl std::fmt::Display for BatchPriority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BatchPriority::PageOrder => write!(f, "page-order"),
+            BatchPriority::FailedFirst => write!(f, "failed-first"),
+            BatchPriority::HardFirst => write!(f, "hard-first"),
+            BatchPriority::ShortFirst => write!(f, "short-first"),
+            BatchPriority::OldestFirst => write!(f, "oldest-first"),
+        }
+    }
 }
 
 impl std::fmt::Display for Provider {
@@ -271,6 +293,20 @@ pub(crate) enum BatchCommand {
     Prepare(BatchPrepareArgs),
     /// Import a local Batch API output JSONL file into the translation cache.
     Import(BatchImportArgs),
+    /// Show local batch workspace, item, and cache state.
+    Health(BatchHealthArgs),
+    /// Verify local batch artifacts against the current EPUB and cache.
+    Verify(BatchVerifyArgs),
+    /// Upload requests.jsonl and create a remote OpenAI batch.
+    Submit(BatchSubmitArgs),
+    /// Refresh remote OpenAI batch status into the local manifest.
+    Status(BatchStatusArgs),
+    /// Download remote batch output/error files.
+    Fetch(BatchFetchArgs),
+    /// Mark selected unfinished batch items for local translation.
+    RerouteLocal(BatchRerouteLocalArgs),
+    /// Translate local_pending batch items through the normal provider backend.
+    TranslateLocal(BatchTranslateLocalArgs),
 }
 
 #[derive(Parser)]
@@ -291,9 +327,92 @@ pub(crate) struct BatchPrepareArgs {
 pub(crate) struct BatchImportArgs {
     /// Input EPUB used for batch prepare.
     pub(crate) input: PathBuf,
-    /// Local Batch API output JSONL file to import.
+    /// Local Batch API output JSONL file to import. Defaults to the fetched batch/output.jsonl.
     #[arg(short, long)]
-    pub(crate) output: PathBuf,
+    pub(crate) output: Option<PathBuf>,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchHealthArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchVerifyArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchSubmitArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    /// Allow replacing an existing recorded batch id.
+    #[arg(long)]
+    pub(crate) force: bool,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchStatusArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchFetchArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    /// Overwrite existing downloaded output/error files.
+    #[arg(long)]
+    pub(crate) force: bool,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchRerouteLocalArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    /// Select items currently in this state. Can be repeated.
+    #[arg(long = "state")]
+    pub(crate) states: Vec<String>,
+    /// Select every item that is not already imported or cached.
+    #[arg(long)]
+    pub(crate) remaining: bool,
+    /// Only reroute remaining items when their count is at or below this value.
+    #[arg(long)]
+    pub(crate) endgame_threshold: Option<usize>,
+    /// Maximum number of items to mark local_pending.
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
+    /// Selection priority for local fallback planning.
+    #[arg(long, value_enum, default_value_t = BatchPriority::PageOrder)]
+    pub(crate) priority: BatchPriority,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchTranslateLocalArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    /// Maximum number of local_pending items to process.
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
+    /// Processing priority for local_pending items.
+    #[arg(long, value_enum, default_value_t = BatchPriority::PageOrder)]
+    pub(crate) priority: BatchPriority,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }

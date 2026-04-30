@@ -452,6 +452,18 @@ epubicus batch reroute-local .\book.epub --remaining --provider ollama --model q
 `--remaining` should mean every item that is not `cached`, `imported`,
 `local_imported`, or `skipped`.
 
+Current implementation:
+
+- Supports repeated `--state <STATE>`.
+- Supports `--remaining`.
+- Supports `--endgame-threshold <N>`.
+- Supports `--limit <N>` for bounded rerouting.
+- Supports `--priority page-order|failed-first|hard-first|short-first|oldest-first`.
+- Excludes items that are already imported, locally imported, or already present
+  in cache from remaining selection.
+- Marks selected items as `local_pending`; provider execution remains in the
+  separate `batch translate-local` step.
+
 ### `batch translate-local`
 
 Responsibilities:
@@ -461,6 +473,17 @@ Responsibilities:
 - Write successful results to the cache immediately.
 - Mark successful items as `local_imported`.
 - Leave failures as `local_pending` with `last_error` populated.
+
+Current implementation:
+
+- Processes `local_pending` items through the existing `Translator` backend.
+- Writes successful results to the original batch `cache_key`, preserving the
+  batch cache slot even when the local provider/model differs.
+- Marks already cached pending items as `local_imported` without another
+  provider call.
+- Supports `--limit <N>` for bounded local catch-up runs.
+- Supports `--priority page-order|failed-first|hard-first|short-first|oldest-first`
+  so bounded runs can finish easier or more urgent items first.
 
 This command is intentionally separate from `batch reroute-local` so the user
 can inspect the selected work before spending local compute time.
@@ -663,7 +686,9 @@ Deliverables:
 
 - `batch submit` uploads the JSONL file and creates the batch.
 - `batch status` retrieves and persists remote status.
-- `batch fetch` downloads output and error files.
+- `batch fetch` downloads output and error files. The local output file is
+  `output.jsonl`; the remote error download is `remote_errors.jsonl` so it does
+  not collide with local import diagnostics in `errors.jsonl`.
 - API key handling reuses the existing OpenAI key flow.
 
 Exit criteria:
@@ -696,10 +721,12 @@ Exit criteria:
 Deliverables:
 
 - Clear summaries for prepare/status/import.
-- `batch health` reports state counts, stale ages, remote batch status, and
-  remaining work.
+- `batch health` reports state counts, request counts, cache-backed work items,
+  import report counts, remote batch IDs/file IDs/failure counts from the local
+  manifest, the oldest pending update, and the age of that pending update.
 - `batch verify` reconciles EPUB extraction, cache entries, and
-  `work_items.jsonl`.
+  `work_items.jsonl` in read-only mode. It reports `missing`, `stale`,
+  `orphaned`, `cache_conflict`, and `invalid_cache` counts.
 - README examples.
 - Import report with counts for imported, failed, rejected, duplicate, and
   already-cached items.

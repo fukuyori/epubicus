@@ -148,31 +148,40 @@ Goal: make processing status visible and repairable before remote submission.
 
 Tasks:
 
-- Implement `batch health`.
-- Implement `batch verify`.
+- Implement `batch health`. Done for local manifest/work-item/cache counts.
+- Implement `batch verify`. Done for read-only local EPUB/work-item/cache
+  consistency checks.
 - `batch health` reports:
-  - state counts
-  - remaining count
-  - last updated timestamp
-  - cache count
-  - stale item count
+  - state counts (implemented)
+  - remaining count (partly visible through state counts)
+  - last updated timestamp (oldest pending update and age implemented)
+  - cache count (implemented as cache-backed work item count)
+  - stale item count (covered by `batch verify`; thresholded health warning is
+    planned)
 - `batch verify` compares:
-  - current EPUB extraction
-  - `work_items.jsonl`
-  - `translations.jsonl`
+  - current EPUB extraction (implemented)
+  - `work_items.jsonl` (implemented)
+  - `translations.jsonl` (implemented through the loaded cache)
 - Report:
-  - `missing`
-  - `stale`
-  - `orphaned`
-  - `cache_conflict`
-  - `invalid_cache`
+  - `missing` (implemented)
+  - `stale` (implemented)
+  - `orphaned` (implemented)
+  - `cache_conflict` (implemented)
+  - `invalid_cache` (implemented)
 - Keep verify read-only by default.
 - Defer `--repair` until the read-only report is trusted.
 
 Verification:
 
+- Tests with local ledger/cache fixtures:
+  - `batch_health_reports_local_workspace_state`
+  - `batch_health_reports_imported_cache_entries`
+  - `batch_health_reports_remote_manifest_and_pending_age`
 - Tests with manipulated ledger/cache fixtures.
-- Verify detects stale prompt/source hashes.
+- Verify detects stale prompt/source hashes:
+  - `batch_verify_accepts_prepared_workspace`
+  - `batch_verify_detects_stale_work_item_hashes`
+  - `batch_verify_detects_imported_state_without_cache`
 - Health output remains stable enough for users to compare runs.
 
 Exit criteria:
@@ -186,28 +195,35 @@ Goal: add the OpenAI Batch API network path.
 
 Tasks:
 
-- Implement `batch submit`.
-- Upload `requests.jsonl` with `purpose=batch`.
+- Implement `batch submit`. Done.
+- Upload `requests.jsonl` with `purpose=batch`. Done.
 - Create batch with:
-  - endpoint `/v1/responses`
-  - `completion_window: "24h"`
+  - endpoint `/v1/responses` (implemented)
+  - `completion_window: "24h"` (implemented)
 - Persist:
-  - `file_id`
-  - `batch_id`
-  - remote status
-- Implement `batch status`.
-- Implement `batch fetch`.
+  - `file_id` (implemented)
+  - `batch_id` (implemented)
+  - remote status (implemented)
+- Implement `batch status`. Done.
+- Implement `batch fetch`. Done.
 - Download:
-  - `output_file_id` -> `output.jsonl`
-  - `error_file_id` -> `errors.jsonl`
-- Make submit/status/fetch safe to rerun.
-- Reuse existing OpenAI API key handling.
+  - `output_file_id` -> `output.jsonl` (implemented)
+  - `error_file_id` -> `remote_errors.jsonl` (implemented)
+- `batch import` defaults to the fetched `output.jsonl`; `--output <PATH>`
+  remains available for fixture or manually downloaded output.
+- Make submit/status/fetch safe to rerun. Done for status/fetch; submit refuses
+  an existing batch id unless `--force` is set.
+- Reuse existing OpenAI API key handling. Done for `OPENAI_API_KEY`,
+  `--openai-api-key`, and `--prompt-api-key`.
 
 Verification:
 
 - Small real batch smoke test.
 - Re-running status updates manifest without corrupting local state.
 - Fetch refuses to overwrite existing output unless `--force` is set.
+- Unit coverage:
+  - `remote_batch_response_updates_manifest_ids_and_status`
+  - `batch_import_defaults_to_fetched_output_file`
 
 Exit criteria:
 
@@ -220,17 +236,20 @@ Goal: let the user recover unfinished work without manual JSONL editing.
 
 Tasks:
 
-- Implement `batch reroute-local`.
-- Implement `batch translate-local`.
+- Implement `batch reroute-local`. Done for marking selected items as
+  `local_pending`.
+- Implement `batch translate-local`. Done for `local_pending` items through the
+  normal provider backend.
 - Selection modes:
-  - `--state failed`
-  - `--state rejected`
-  - `--remaining`
-  - `--endgame-threshold N`
-- Mark selected items as `local_pending`.
-- Translate `local_pending` through existing backend, usually Ollama.
-- Write successful local results to cache immediately.
-- Mark successful local results as `local_imported`.
+  - `--state failed` (implemented for arbitrary repeated `--state`)
+  - `--state rejected` (implemented)
+  - `--remaining` (implemented)
+  - `--endgame-threshold N` (implemented)
+  - `--limit N` (implemented)
+- Mark selected items as `local_pending`. Done.
+- Translate `local_pending` through existing backend, usually Ollama. Done.
+- Write successful local results to cache immediately. Done.
+- Mark successful local results as `local_imported`. Done.
 - Preserve provider/model in cache records.
 
 Verification:
@@ -238,6 +257,11 @@ Verification:
 - Failed/rejected fixtures can be rerouted and imported locally.
 - `--remaining` excludes already imported/cached/skipped items.
 - Local translation failures keep state and `last_error`.
+- Unit coverage:
+  - `batch_reroute_local_marks_selected_state`
+  - `batch_reroute_local_respects_endgame_threshold`
+  - `batch_reroute_local_short_first_honors_limit`
+  - `batch_translate_local_marks_cached_pending_items_imported`
 
 Exit criteria:
 
@@ -250,15 +274,15 @@ Goal: improve speed and reduce tail latency.
 Tasks:
 
 - Add priority selection for reroute/retry:
-  - `page-order`
-  - `failed-first`
-  - `hard-first`
-  - `short-first`
-  - `oldest-first`
+  - `page-order` (implemented)
+  - `failed-first` (implemented)
+  - `hard-first` (implemented)
+  - `short-first` (implemented)
+  - `oldest-first` (implemented)
 - Define complexity score:
-  - source chars
-  - placeholder count
-  - previous failure count
+  - source chars (implemented)
+  - placeholder count (implemented)
+  - previous failure count (partly implemented through attempt/last_error)
 - Add explicit endgame flow:
   - show selected remaining count
   - reroute to local or synchronous provider
@@ -266,7 +290,9 @@ Tasks:
 
 Verification:
 
-- Priority ordering unit tests.
+- Priority ordering unit tests:
+  - `batch_reroute_local_short_first_honors_limit`
+  - `batch_translate_local_short_first_honors_limit`
 - Endgame selection excludes imported/cached items.
 - User-facing summaries show why items were selected.
 

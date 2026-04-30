@@ -395,6 +395,35 @@ impl Translator {
     pub(crate) fn api_usage_summary(&self) -> Option<String> {
         self.backend.api_usage_summary()
     }
+
+    pub(crate) fn translate_uncached_source(
+        &self,
+        source: &str,
+    ) -> Result<(String, Provider, String, bool)> {
+        if self.dry_run {
+            return Ok((
+                source.to_string(),
+                self.backend.provider,
+                self.backend.model.clone(),
+                false,
+            ));
+        }
+        let glossary_subset = self.backend.glossary_subset(source);
+        let job = TranslationJob {
+            index: 0,
+            source: source.to_string(),
+            glossary_subset,
+            key: String::new(),
+        };
+        let result =
+            run_translation_job_with_fallback(&self.backend, self.fallback_backend.as_ref(), job)?;
+        Ok((
+            result.translated,
+            result.provider,
+            result.model,
+            result.fallback_used,
+        ))
+    }
 }
 
 fn run_translation_job_with_fallback(

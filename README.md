@@ -148,7 +148,7 @@ cargo run -- batch     <SUBCOMMAND>
 
 `unlock` removes a stale input-use flag for an EPUB. Without `--force`, it only removes the flag when the recorded process is no longer running on the same host.
 
-`batch prepare` creates local OpenAI Batch API request artifacts without making a network call. `batch import --output <PATH>` imports a local Batch API output JSONL file into the normal translation cache. Remote `submit`, `status`, and `fetch` are still planned.
+`batch prepare` creates local OpenAI Batch API request artifacts without making a network call. `batch submit` uploads `requests.jsonl` and creates an OpenAI Batch API job. `batch status` refreshes the remote status into `batch_manifest.json`. `batch fetch` downloads remote `output.jsonl` and `remote_errors.jsonl` without importing them. `batch import` imports the fetched `output.jsonl` into the normal translation cache; `--output <PATH>` can import another local Batch API output JSONL file. `batch reroute-local` marks selected unfinished items as `local_pending`. `batch translate-local` translates `local_pending` items through the normal provider backend and writes them to the original batch cache slots. Local fallback commands support `--limit <N>` and `--priority page-order|failed-first|hard-first|short-first|oldest-first` for bounded catch-up runs. `batch health` shows the local batch manifest, remote batch IDs, work item states, request count, import report, cache-backed work, and oldest pending age. `batch verify` checks the current EPUB, `work_items.jsonl`, and cache for missing, stale, orphaned, conflicting, or invalid entries.
 
 ## Options
 
@@ -240,8 +240,9 @@ The asynchronous OpenAI Batch API workflow is designed in
 [docs/batch-api-design.md](docs/batch-api-design.md), with the implementation
 plan in
 [docs/batch-api-implementation-plan.md](docs/batch-api-implementation-plan.md).
-The current implementation supports the local `batch prepare` and
-`batch import --output <PATH>` stages; remote submit/status/fetch are planned.
+The current implementation supports the local `batch prepare`,
+`batch import`, `batch health`, `batch verify`, and OpenAI
+`batch submit/status/fetch` stages.
 
 ```powershell
 cargo run -- test .\book.epub --from 1 --to 1 --provider ollama --model qwen3:14b

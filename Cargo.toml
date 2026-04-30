@@ -1,6 +1,6 @@
 [package]
 name = "epubicus"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 authors = ["fukuyori <self@spumoni.org>"]
 description = "Translate English EPUB files to Japanese with local Ollama (or OpenAI / Claude), preserving inline formatting"
@@ -14,7 +14,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.18"
 quick-xml = "0.38"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
