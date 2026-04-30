@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 use crate::{
     config::{CacheArgs, CacheCommand, CommonArgs},
     glossary::GlossaryEntry,
+    lock::FileLock,
 };
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
@@ -75,6 +76,7 @@ pub(crate) struct CacheStore {
     pub(crate) dir: PathBuf,
     pub(crate) translations_path: PathBuf,
     pub(crate) manifest_path: PathBuf,
+    pub(crate) lock_path: PathBuf,
     /// Short hex (first 16 bytes) of the input EPUB hash, used as the directory name.
     #[allow(dead_code)]
     pub(crate) input_hash: String,
@@ -93,9 +95,11 @@ impl CacheStore {
         let (input_sha256, input_hash) = compute_input_hash(input)?;
         let root = resolve_cache_root(args.cache_root.as_deref())?;
         let dir = root.join(&input_hash);
+        let lock_path = cache_lock_path(&root, &input_hash);
         let translations_path = dir.join(TRANSLATIONS_FILE);
         let manifest_path = dir.join(MANIFEST_FILE);
         if args.clear_cache && dir.exists() {
+            let _lock = FileLock::acquire(&lock_path, "clear cache")?;
             fs::remove_dir_all(&dir)
                 .with_context(|| format!("failed to clear cache {}", dir.display()))?;
         }
@@ -105,6 +109,7 @@ impl CacheStore {
                 dir,
                 translations_path,
                 manifest_path,
+                lock_path,
                 input_hash,
                 input_sha256,
                 entries: HashMap::new(),
@@ -120,6 +125,7 @@ impl CacheStore {
             dir,
             translations_path,
             manifest_path,
+            lock_path,
             input_hash,
             input_sha256,
             entries,
@@ -161,8 +167,18 @@ impl CacheStore {
         if !self.enabled {
             return Ok(());
         }
-        if self.entries.contains_key(&record.key) {
-            return Ok(());
+        let _lock = FileLock::acquire(&self.lock_path, "write cache")?;
+        let disk_entries = read_cache_entries(&self.translations_path)?;
+        if let Some(existing) = disk_entries.get(&record.key) {
+            if existing == &record.translated {
+                self.entries
+                    .insert(record.key.clone(), record.translated.clone());
+                return Ok(());
+            }
+            bail!(
+                "cache key conflict for {}; existing translation differs from new translation",
+                record.key
+            );
         }
         let mut file = OpenOptions::new()
             .create(true)
@@ -190,6 +206,7 @@ impl CacheStore {
         if !self.enabled {
             return Ok(());
         }
+        let _lock = FileLock::acquire(&self.lock_path, "write cache manifest")?;
         let now = chrono::Utc::now().to_rfc3339();
         let existing: Option<Manifest> = if self.manifest_path.exists() {
             let data = fs::read_to_string(&self.manifest_path).with_context(|| {
@@ -241,6 +258,7 @@ impl CacheStore {
         if !self.enabled || self.keep_cache {
             return Ok(());
         }
+        let _lock = FileLock::acquire(&self.lock_path, "finalize cache")?;
         if self.dir.exists() {
             fs::remove_dir_all(&self.dir).with_context(|| {
                 format!("failed to remove cache directory {}", self.dir.display())
@@ -292,6 +310,10 @@ fn resolve_cache_root(override_root: Option<&Path>) -> Result<PathBuf> {
         return Ok(PathBuf::from(home).join(".cache").join("epubicus"));
     }
     bail!("cannot determine default cache root; set --cache-root explicitly");
+}
+
+fn cache_lock_path(root: &Path, input_hash: &str) -> PathBuf {
+    root.join(".locks").join(format!("{input_hash}.lock"))
 }
 
 fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
@@ -358,6 +380,105 @@ pub(crate) fn cache_command(args: CacheArgs) -> Result<()> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        CommonArgs, DEFAULT_CLAUDE_BASE_URL, DEFAULT_CONCURRENCY, DEFAULT_MAX_CHARS_PER_REQUEST,
+        DEFAULT_MODEL, DEFAULT_OLLAMA_HOST, DEFAULT_OPENAI_BASE_URL, Provider,
+    };
+
+    fn common_args(cache_root: PathBuf) -> CommonArgs {
+        CommonArgs {
+            provider: Provider::Ollama,
+            model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
+            ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
+            claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
+            openai_api_key: None,
+            anthropic_api_key: None,
+            prompt_api_key: false,
+            temperature: 0.3,
+            num_ctx: 8192,
+            timeout_secs: 900,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
+            style: "essay".to_string(),
+            glossary: None,
+            cache_root: Some(cache_root),
+            no_cache: false,
+            clear_cache: false,
+            keep_cache: true,
+            usage_only: false,
+            partial_from_cache: false,
+            dry_run: false,
+        }
+    }
+
+    fn record(key: &str, translated: &str) -> CacheRecord {
+        CacheRecord {
+            key: key.to_string(),
+            translated: translated.to_string(),
+            provider: "ollama".to_string(),
+            model: DEFAULT_MODEL.to_string(),
+            at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn duplicate_cache_insert_accepts_identical_translation() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("book.epub");
+        fs::write(&input, b"dummy")?;
+        let args = common_args(dir.path().join("cache"));
+        let mut first = CacheStore::from_args(&input, &args)?;
+        first.insert(record("abc", "訳文"))?;
+
+        let mut second = CacheStore::from_args(&input, &args)?;
+        second.insert(record("abc", "訳文"))?;
+
+        let entries = read_cache_entries(&first.translations_path)?;
+        assert_eq!(entries.get("abc").map(String::as_str), Some("訳文"));
+        assert_eq!(second.stats.writes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_cache_insert_rejects_conflicting_translation() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("book.epub");
+        fs::write(&input, b"dummy")?;
+        let args = common_args(dir.path().join("cache"));
+        let mut first = CacheStore::from_args(&input, &args)?;
+        first.insert(record("abc", "訳文A"))?;
+
+        let mut second = CacheStore::from_args(&input, &args)?;
+        let err = second.insert(record("abc", "訳文B")).unwrap_err();
+        assert!(err.to_string().contains("cache key conflict"));
+        Ok(())
+    }
+
+    #[test]
+    fn cache_lock_file_is_outside_cache_directory() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("book.epub");
+        fs::write(&input, b"dummy")?;
+        let args = common_args(dir.path().join("cache"));
+        let cache = CacheStore::from_args(&input, &args)?;
+
+        assert!(
+            cache
+                .lock_path
+                .starts_with(dir.path().join("cache").join(".locks"))
+        );
+        assert!(!cache.lock_path.starts_with(&cache.dir));
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct CacheEntryInfo {
     hash: String,
@@ -377,6 +498,9 @@ fn collect_cache_entries(root: &Path) -> Result<Vec<CacheEntryInfo>> {
     {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if entry.file_name() == ".locks" {
             continue;
         }
         let dir = entry.path();
@@ -599,6 +723,7 @@ fn cache_prune(root: &Path, older_than_days: u64, yes: bool, dry_run: bool) -> R
     }
     let mut freed = 0u64;
     for v in &victims {
+        let _lock = FileLock::acquire(&cache_lock_path(root, &v.hash), "prune cache")?;
         fs::remove_dir_all(&v.dir)
             .with_context(|| format!("failed to remove cache dir {}", v.dir.display()))?;
         freed += v.size_bytes;
@@ -662,6 +787,7 @@ fn cache_clear(root: &Path, hash: Option<&str>, all: bool, yes: bool, dry_run: b
             }
         }
         for e in &entries {
+            let _lock = FileLock::acquire(&cache_lock_path(root, &e.hash), "clear cache")?;
             fs::remove_dir_all(&e.dir)
                 .with_context(|| format!("failed to remove cache dir {}", e.dir.display()))?;
         }
@@ -682,6 +808,7 @@ fn cache_clear(root: &Path, hash: Option<&str>, all: bool, yes: bool, dry_run: b
         );
         return Ok(());
     }
+    let _lock = FileLock::acquire(&cache_lock_path(root, &entry.hash), "clear cache")?;
     fs::remove_dir_all(&entry.dir)
         .with_context(|| format!("failed to remove cache dir {}", entry.dir.display()))?;
     println!(

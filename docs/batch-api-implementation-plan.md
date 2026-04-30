@@ -13,25 +13,53 @@ Goal: make the current cache path safe enough for batch and multi-process use.
 Tasks:
 
 - Add cache and batch lock primitives.
+- Add a non-waiting input run lock so a second command for the same EPUB fails
+  before unpacking or scanning the file.
+- Add automatic stale input run lock cleanup when the recorded process is no
+  longer running on the same host.
+- Add an explicit `unlock <INPUT.epub>` recovery command with `--force` for
+  last-resort manual cleanup.
 - Define lock order: batch lock first, cache lock second.
+- Add lock metadata:
+  - process id
+  - hostname
+  - command
+  - purpose
+  - input hash
+  - created timestamp
+  - heartbeat timestamp
+- Add lock waiting controls:
+  - default wait with periodic holder-status output
+  - `--lock-timeout <seconds>`
+  - immediate failure with `--lock-timeout 0`
+  - explicit stale-lock recovery option
+- Add stale-lock detection:
+  - heartbeat age check
+  - same-host process liveness check
+  - no silent lock breaking
 - Protect `translations.jsonl`, `manifest.json`, and cache deletion with the
   cache lock.
 - Add duplicate cache-key handling:
   - identical translated text: accept as already done
   - conflicting translated text: reject and report
 - Add atomic JSON state writer for manifest-like files.
-- Add tests for lock acquisition, duplicate cache insert, and atomic write.
+- Add tests for lock acquisition, lock release, wait timeout, stale-lock
+  detection, duplicate cache insert, and atomic write.
 
 Verification:
 
 - `cargo test`
 - A test with two writers cannot corrupt `translations.jsonl`.
 - Cache deletion refuses or waits while another process holds the cache lock.
+- A stale lock is reported with holder metadata and is not broken unless the
+  explicit recovery option is used.
 
 Exit criteria:
 
 - Existing `translate` behavior still works.
 - Cache writes are serialized across processes.
+- Two commands that need both batch and cache state acquire locks in the stable
+  order and cannot deadlock.
 
 ## Phase 1: Work item ledger and prepare
 
@@ -101,6 +129,13 @@ Verification:
 - Duplicate output lines are handled deterministically.
 - Reordered output lines import correctly.
 - `translate --partial-from-cache` can assemble from imported cache.
+
+Current coverage:
+
+- `batch_import_writes_valid_output_to_cache`
+- `batch_import_accepts_reordered_output`
+- `batch_import_rejects_invalid_translation_without_caching`
+- `batch_import_reports_duplicate_output_custom_id`
 
 Exit criteria:
 
@@ -288,4 +323,3 @@ The first useful milestone is the end of Phase 2: even without OpenAI network
 calls, epubicus can produce batch requests and import fixture results into the
 cache. That proves the split/import/assemble model before remote complexity is
 added.
-

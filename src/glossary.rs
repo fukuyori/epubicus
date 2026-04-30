@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::GlossaryArgs,
     epub::{EpubBook, is_never_translate_tag, unpack_epub},
+    input_lock::acquire_input_run_lock,
 };
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct GlossaryFile {
@@ -37,6 +38,7 @@ struct GlossaryCandidate {
 }
 
 pub(crate) fn glossary_command(args: GlossaryArgs) -> Result<()> {
+    let _run_lock = acquire_input_run_lock(&args.input, "glossary input EPUB")?;
     let book = unpack_epub(&args.input)?;
     let candidates = extract_glossary_candidates(&book, args.min_occurrences, args.max_entries)?;
     let glossary = GlossaryFile {

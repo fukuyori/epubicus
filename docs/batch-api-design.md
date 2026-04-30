@@ -115,12 +115,24 @@ Lock scope:
 
 | Lock | Path | Protects |
 |--|--|--|
-| cache lock | `<cache-root>/<input-hash>/.lock` | `translations.jsonl`, `manifest.json`, cache directory deletion |
-| batch lock | `<cache-root>/<input-hash>/batch/.lock` | `batch_manifest.json`, `work_items.jsonl`, request/output/error artifacts |
+| input run lock | OS temp dir `epubicus/.locks/<input-hash>.<path-hash>.run.lock` | Prevents multiple commands from reading or processing the same input EPUB path at the same time |
+| cache lock | `<cache-root>/.locks/<input-hash>.lock` | `translations.jsonl`, `manifest.json`, cache directory deletion |
+| batch lock | `<cache-root>/.locks/<input-hash>.batch.lock` | `batch_manifest.json`, `work_items.jsonl`, request/output/error artifacts |
 
 Rules:
 
 - Processes for different input hashes must not block each other.
+- A command that reads an input EPUB should acquire the input run lock before
+  unpacking or scanning it. If the run lock already exists, the command should
+  fail immediately instead of waiting. This prevents accidental double starts
+  for the same EPUB.
+- If the input run lock records the current host and a process id that is no
+  longer running, a later command may remove that stale run lock automatically
+  and continue.
+- `unlock <INPUT.epub>` should explicitly remove a stale input run lock.
+  `unlock --force <INPUT.epub>` may remove a run lock even when the recorded
+  process still appears active, and should be documented as a last-resort
+  recovery command.
 - All writes to `translations.jsonl` must hold the cache lock.
 - All writes to `manifest.json` must hold the cache lock.
 - `finalize_completion` must hold the cache lock and must not delete a cache
@@ -133,6 +145,57 @@ Rules:
   record process id, hostname, command, and timestamp for diagnostics.
 - Commands should default to waiting for locks with a visible message. A later
   `--lock-timeout` option can limit the wait.
+
+Lock acquisition policy:
+
+- Default behavior is wait-and-report. While waiting, print a compact status at
+  a fixed interval with the lock path, holder process id, holder command,
+  elapsed wait time, and last heartbeat time.
+- `--lock-timeout <seconds>` should fail cleanly after the timeout with the same
+  holder metadata and a recovery hint.
+- `--lock-timeout 0` should mean fail immediately if the lock is held. This is
+  useful for scheduled jobs and wrapper scripts that should not block.
+- Lock files must include `pid`, `hostname`, `command`, `purpose`,
+  `input_hash`, `created_at`, and `heartbeat_at`.
+- Long-running commands should refresh `heartbeat_at` periodically while they
+  own the lock.
+
+Stale lock policy:
+
+- A fresh lock must never be removed by another process.
+- A lock is only stale when the heartbeat is older than the configured stale
+  threshold and, on the same host, the recorded process id is no longer alive.
+- If process liveness cannot be checked, heartbeat age is only diagnostic unless
+  the user explicitly asks to break the stale lock.
+- Breaking a stale lock should require an explicit option such as
+  `--break-stale-lock`. The command should print the old holder metadata before
+  replacing the lock.
+- Recovery instructions should prefer rerunning the interrupted command first.
+  Manual lock deletion is a last resort.
+
+Deadlock avoidance:
+
+- Any command that needs both locks must acquire the batch lock first and the
+  cache lock second.
+- No command may wait for the batch lock while holding the cache lock.
+- Commands must not hold locks while waiting for user input.
+- Commands should not hold locks while waiting for long remote Batch API
+  completion. They should lock only to read or update local state, release the
+  lock during remote waiting or polling delays, then reacquire before committing
+  local changes.
+- `batch import` is the narrow critical section: acquire batch lock, acquire
+  cache lock, validate output against `work_items.jsonl`, append accepted cache
+  entries, update the ledger, then release both locks.
+
+Read behavior:
+
+- Read-only commands may read without a lock when they can tolerate a changing
+  snapshot, but they must re-read after acquiring a lock before making a write.
+- Commands that display authoritative state, such as a final import summary,
+  should read under the relevant lock or read immediately after the locked
+  update.
+- A lock-free read must treat partial or malformed in-progress files as
+  transient and retry or report a clear "state is being updated" message.
 
 Atomic file update rules:
 
@@ -154,6 +217,8 @@ Concurrent command behavior:
 | `translate` while `batch import` runs | Cache writes are serialized; neither process may truncate or delete cache under the other |
 | `batch status` while `batch import` runs | Status may wait for the batch lock before updating local manifest |
 | `batch prepare --clear-cache` while another process uses cache | Must wait or fail with a clear lock message; must not delete active cache |
+| Stale lock left by a killed process | Must report holder metadata; may break only with explicit stale-lock option |
+| Long `batch submit`/`batch fetch` polling | Must not block unrelated cache writes while sleeping or waiting remotely |
 | Different EPUB hashes | No shared locks; run independently |
 
 The state ledger makes concurrency safer but does not replace locking. State

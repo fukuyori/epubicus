@@ -34,6 +34,10 @@ pub(crate) enum Commands {
     Glossary(GlossaryArgs),
     /// Inspect or maintain translation caches.
     Cache(CacheArgs),
+    /// Prepare and manage asynchronous batch translation artifacts.
+    Batch(BatchArgs),
+    /// Remove a stale input-use flag for an EPUB.
+    Unlock(UnlockArgs),
 }
 
 #[derive(Parser, Clone)]
@@ -182,6 +186,15 @@ pub(crate) struct TocArgs {
 }
 
 #[derive(Parser)]
+pub(crate) struct UnlockArgs {
+    /// Input EPUB whose input-use flag should be removed.
+    pub(crate) input: PathBuf,
+    /// Remove the flag even if the recorded process still appears to be running.
+    #[arg(long)]
+    pub(crate) force: bool,
+}
+
+#[derive(Parser)]
 pub(crate) struct GlossaryArgs {
     /// Input EPUB.
     pub(crate) input: PathBuf,
@@ -244,4 +257,43 @@ pub(crate) enum CacheCommand {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchArgs {
+    #[command(subcommand)]
+    pub(crate) command: BatchCommand,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum BatchCommand {
+    /// Prepare local Batch API request files without submitting them.
+    Prepare(BatchPrepareArgs),
+    /// Import a local Batch API output JSONL file into the translation cache.
+    Import(BatchImportArgs),
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchPrepareArgs {
+    /// Input EPUB.
+    pub(crate) input: PathBuf,
+    /// First spine page to include, 1-based.
+    #[arg(long)]
+    pub(crate) from: Option<usize>,
+    /// Last spine page to include, 1-based and inclusive.
+    #[arg(long)]
+    pub(crate) to: Option<usize>,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct BatchImportArgs {
+    /// Input EPUB used for batch prepare.
+    pub(crate) input: PathBuf,
+    /// Local Batch API output JSONL file to import.
+    #[arg(short, long)]
+    pub(crate) output: PathBuf,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
 }

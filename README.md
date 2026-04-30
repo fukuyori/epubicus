@@ -69,6 +69,18 @@ cargo run -- translate .\book.epub -o .\book.ja.epub --keep-cache
 
 After an interrupted run, rerun the same `translate` command to resume from uncached blocks. Because the cache directory is keyed by input EPUB hash, resuming works regardless of the output path. During parallel execution, each successful block is written to the cache immediately instead of waiting for the whole page batch to finish, so an interruption only loses blocks that were still in flight and had not returned yet. The progress bar starts at the cached position and shows a message such as `resuming: 991/5805 cached`.
 
+Only one epubicus command may read or process the same input EPUB at a time. If a previous process was killed and left an input-use flag behind, epubicus removes it automatically when the recorded process is no longer running. You can also remove it explicitly:
+
+```powershell
+cargo run -- unlock .\book.epub
+```
+
+If the recorded process still appears to be running, `unlock` refuses to remove the flag. Use `--force` only after confirming no epubicus process is using that EPUB:
+
+```powershell
+cargo run -- unlock .\book.epub --force
+```
+
 On a successful full-range translation, the cache directory is **automatically deleted**. Pass `--keep-cache` to retain it (useful for debugging or to keep entries available for partial reuse).
 
 Create a partial translated EPUB from cache only, leaving cache misses unchanged. This mode is **read-only on the cache** (no manifest update, no auto-delete):
@@ -120,6 +132,8 @@ cargo run -- inspect   <INPUT.epub>
 cargo run -- toc       <INPUT.epub>
 cargo run -- glossary  <INPUT.epub> [-o glossary.json]
 cargo run -- cache     <SUBCOMMAND>
+cargo run -- unlock    <INPUT.epub> [--force]
+cargo run -- batch     <SUBCOMMAND>
 ```
 
 `translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA stays as `ETA warming up` until at least 5 uncached model-translated blocks and 30 seconds have been observed. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
@@ -131,6 +145,10 @@ cargo run -- cache     <SUBCOMMAND>
 `toc` shows EPUB3 `nav.xhtml` or EPUB2 NCX table-of-contents entries with indentation and target hrefs.
 
 `glossary` extracts candidate proper nouns and terms into JSON for manual review.
+
+`unlock` removes a stale input-use flag for an EPUB. Without `--force`, it only removes the flag when the recorded process is no longer running on the same host.
+
+`batch prepare` creates local OpenAI Batch API request artifacts without making a network call. `batch import --output <PATH>` imports a local Batch API output JSONL file into the normal translation cache. Remote `submit`, `status`, and `fetch` are still planned.
 
 ## Options
 
@@ -218,10 +236,12 @@ Provider-specific `--model` defaults:
 
 Ollama is the default provider and runs locally:
 
-The future asynchronous OpenAI Batch API workflow is designed in
+The asynchronous OpenAI Batch API workflow is designed in
 [docs/batch-api-design.md](docs/batch-api-design.md), with the implementation
 plan in
 [docs/batch-api-implementation-plan.md](docs/batch-api-implementation-plan.md).
+The current implementation supports the local `batch prepare` and
+`batch import --output <PATH>` stages; remote submit/status/fetch are planned.
 
 ```powershell
 cargo run -- test .\book.epub --from 1 --to 1 --provider ollama --model qwen3:14b
