@@ -6,9 +6,11 @@ use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::{
     collections::HashSet,
-    fs,
+    error::Error as StdError,
+    fmt, fs,
     io::Cursor,
     path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 use anyhow::{Context, Result, bail};
@@ -33,6 +35,7 @@ mod input_lock;
 mod lock;
 mod progress;
 mod prompt;
+mod recovery;
 mod translator;
 mod usage;
 mod xhtml;
@@ -56,6 +59,7 @@ use progress::ProgressReporter;
 #[cfg(test)]
 use prompt::retry_user_prompt;
 use prompt::{system_prompt, user_prompt};
+use recovery::{UntranslatedReport, recover_command, scan_recovery_command};
 #[cfg(test)]
 use translator::{
     ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD, AdaptiveConcurrency, PROMPT_VERSION, Translation,
@@ -85,7 +89,48 @@ struct Stats {
     blocks_translated: usize,
 }
 
-fn main() -> Result<()> {
+const EXIT_RECOVERABLE_ERROR: u8 = 2;
+
+#[derive(Debug)]
+struct RecoverableError {
+    message: String,
+}
+
+impl fmt::Display for RecoverableError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl StdError for RecoverableError {}
+
+pub(crate) fn recoverable_error(message: impl Into<String>) -> anyhow::Error {
+    RecoverableError {
+        message: message.into(),
+    }
+    .into()
+}
+
+fn is_recoverable_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<RecoverableError>().is_some())
+}
+
+fn main() -> ExitCode {
+    match run_cli() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            if is_recoverable_error(&err) {
+                ExitCode::from(EXIT_RECOVERABLE_ERROR)
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Translate(args) => translate_command(args),
@@ -95,6 +140,8 @@ fn main() -> Result<()> {
         Commands::Glossary(args) => glossary_command(args),
         Commands::Cache(args) => cache_command(args),
         Commands::Batch(args) => batch_command(args),
+        Commands::Recover(args) => recover_command(args),
+        Commands::ScanRecovery(args) => scan_recovery_command(args),
         Commands::Unlock(args) => unlock_command(args),
     }
 }
@@ -122,7 +169,20 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
             .cache
             .upsert_manifest(&args.input, params, Some(&output))?;
     }
-    let mut stats = translate_book(&book, range, &mut translator, Mode::Write, true)?;
+    let mut untranslated_report = UntranslatedReport::for_output(
+        &args.input,
+        &output,
+        &translator.cache.root,
+        &translator.cache.dir,
+    );
+    let mut stats = translate_book(
+        &book,
+        range,
+        &mut translator,
+        Mode::Write,
+        true,
+        Some(&mut untranslated_report),
+    )?;
     update_opf_metadata(&book.opf_path, &translator.backend.model)?;
     pack_epub(book.work_dir.path(), &output)?;
     stats.pages_seen = book.spine.len();
@@ -160,14 +220,23 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     if let Some(summary) = translator.api_usage_summary() {
         eprintln!("API usage: {summary}");
     }
-    if partial_from_cache && translator.cache.stats.misses > 0 {
-        eprintln!(
-            "warning: partial output contains {} cache miss(es); unchanged source text may remain. Run batch verify/health or fill the missing items before final use.",
-            translator.cache.stats.misses
-        );
-    }
     if translator.fallback_count > 0 {
         eprintln!("Fallback translations: {}", translator.fallback_count);
+    }
+    if let Some(summary) = untranslated_report.finish()? {
+        eprintln!(
+            "Untranslated report: {} block(s) written to {}",
+            summary.count,
+            summary.path.display()
+        );
+        eprintln!("Recovery log: {}", summary.recovery_path.display());
+    }
+    if partial_from_cache && translator.cache.stats.misses > 0 {
+        return Err(recoverable_error(format!(
+            "partial output contains {} cache miss(es); unchanged source text remains. Output EPUB was written to {}.",
+            translator.cache.stats.misses,
+            output.display()
+        )));
     }
     Ok(())
 }
@@ -185,7 +254,7 @@ fn test_command(args: TestArgs) -> Result<()> {
         report.print(&translator);
         return Ok(());
     }
-    let stats = translate_book(&book, range, &mut translator, Mode::Stdout, false)?;
+    let stats = translate_book(&book, range, &mut translator, Mode::Stdout, false, None)?;
     eprintln!(
         "Translated {} spine pages, {} blocks.",
         stats.pages_translated, stats.blocks_translated
@@ -305,6 +374,7 @@ fn translate_book(
     translator: &mut Translator,
     mode: Mode,
     show_progress: bool,
+    mut untranslated_report: Option<&mut UntranslatedReport>,
 ) -> Result<Stats> {
     let selected: HashSet<usize> = range.collect();
     let mut stats = Stats::default();
@@ -327,8 +397,16 @@ fn translate_book(
         if mode == Mode::Stdout {
             println!("\n===== spine page {page_no}: {} =====\n", item.href);
         }
-        let result = translate_xhtml_file(&item.abs_path, translator, mode, progress.as_mut())
-            .with_context(|| format!("failed to translate spine page {page_no}: {}", item.href))?;
+        let result = translate_xhtml_file(
+            &item.abs_path,
+            translator,
+            mode,
+            progress.as_mut(),
+            page_no,
+            &item.href,
+            untranslated_report.as_deref_mut(),
+        )
+        .with_context(|| format!("failed to translate spine page {page_no}: {}", item.href))?;
         stats.blocks_translated += result;
     }
     if let Some(progress) = progress {
@@ -574,11 +652,12 @@ mod tests {
             usage_only: false,
             partial_from_cache: false,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: true,
         };
         let cache = CacheStore::from_args(&input, &common)?;
         let mut translator = Translator::new(common, cache)?;
-        let stats = translate_book(&book, 1..=2, &mut translator, Mode::Write, false)?;
+        let stats = translate_book(&book, 1..=2, &mut translator, Mode::Write, false, None)?;
         assert_eq!(stats.pages_translated, 2);
         assert_eq!(stats.blocks_translated, 3);
         update_opf_metadata(&book.opf_path, &translator.backend.model)?;
@@ -734,7 +813,8 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         let prompt = user_prompt("Horizon failed.", &subset);
-        assert!(prompt.contains("Horizon => ホライゾン (system)"));
+        assert!(prompt.contains("Horizon => ホライゾン"));
+        assert!(!prompt.contains("(system)"));
         assert!(!prompt.contains("Unused"));
         assert!(prompt.contains("<source>\nHorizon failed.\n</source>"));
     }
@@ -753,7 +833,8 @@ mod tests {
             "Horizon failed.",
             "translation validation failed: provider returned the source text unchanged",
         );
-        assert!(prompt.contains("Horizon => ホライゾン (system)"));
+        assert!(prompt.contains("Horizon => ホライゾン"));
+        assert!(!prompt.contains("(system)"));
         assert!(prompt.contains("<source>\nHorizon failed.\n</source>"));
         assert!(prompt.contains("<retry_instruction>"));
         assert!(prompt.contains("source text unchanged"));
@@ -851,6 +932,37 @@ mod tests {
             &[entry_b],
         );
         assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn cache_key_uses_trimmed_glossary_src_and_dst() {
+        let entry_a = GlossaryEntry {
+            src: "Horizon".to_string(),
+            dst: "ホライゾン".to_string(),
+            kind: None,
+            note: None,
+        };
+        let entry_b = GlossaryEntry {
+            src: " Horizon ".to_string(),
+            dst: " ホライゾン ".to_string(),
+            kind: Some("ignored".to_string()),
+            note: Some("ignored".to_string()),
+        };
+        let key_a = cache_key(
+            Provider::Ollama,
+            "qwen3:14b",
+            "essay",
+            "Horizon",
+            &[entry_a],
+        );
+        let key_b = cache_key(
+            Provider::Ollama,
+            "qwen3:14b",
+            "essay",
+            "Horizon",
+            &[entry_b],
+        );
+        assert_eq!(key_a, key_b);
     }
 
     #[test]
@@ -999,6 +1111,7 @@ mod tests {
             usage_only: false,
             partial_from_cache: false,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: false,
         };
         let source = "This paragraph should be translated into Japanese.";
@@ -1049,6 +1162,7 @@ mod tests {
             usage_only: false,
             partial_from_cache: false,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: false,
         };
         let mut cache = CacheStore::from_args(&input, &args)?;
@@ -1116,6 +1230,7 @@ mod tests {
             usage_only: false,
             partial_from_cache: true,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;
@@ -1131,6 +1246,20 @@ mod tests {
         assert_eq!(translator.cache.stats.misses, 1);
         assert_eq!(translator.cache.stats.writes, 0);
         Ok(())
+    }
+
+    #[test]
+    fn recoverable_errors_are_classified_for_exit_code() {
+        let err = recoverable_error("partial output contains untranslated blocks");
+
+        assert!(is_recoverable_error(&err));
+    }
+
+    #[test]
+    fn ordinary_errors_are_not_recoverable_exit_code() {
+        let err = anyhow::anyhow!("fatal failure");
+
+        assert!(!is_recoverable_error(&err));
     }
 
     #[test]
@@ -1165,6 +1294,7 @@ mod tests {
             usage_only: false,
             partial_from_cache: false,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;
@@ -1207,6 +1337,7 @@ mod tests {
             usage_only: false,
             partial_from_cache: false,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;
@@ -1248,6 +1379,7 @@ mod tests {
             usage_only: true,
             partial_from_cache: false,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: false,
         };
         let cache = CacheStore::from_args(&input, &args)?;

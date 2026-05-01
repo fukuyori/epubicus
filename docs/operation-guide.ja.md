@@ -145,6 +145,21 @@ cargo run -- batch verify .\book.epub
 cargo run -- translate .\book.epub --partial-from-cache --keep-cache --output .\book_jp.epub
 ```
 
+`translate` が `Recovery log:` を表示した場合は、復旧ログから不足ブロックだけ再翻訳できます。EPUB まで作り直す場合は `--rebuild` を付けます。
+
+```powershell
+$log = ".\.batch-openai-cache\<hash>\recovery\book_jp\recovery.jsonl"
+cargo run -- recover $log --provider ollama --model qwen3:14b --rebuild
+cargo run -- recover --cache .\book.epub --provider ollama --model qwen3:14b --rebuild
+```
+
+出力済み EPUB を後から検査して復旧ログを作る場合:
+
+```powershell
+cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model qwen3:14b
+cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model qwen3:14b --recover --rebuild
+```
+
 リモート再試行用の JSONL を作る場合:
 
 ```powershell
@@ -171,6 +186,8 @@ cargo run -- cache show .\book.epub
 cargo run -- cache prune --older-than 30
 cargo run -- cache clear --hash <hash>
 ```
+
+`cache list` と `cache show` では、翻訳キャッシュだけでなく、同じキャッシュ配下に保存された復旧ログの件数も確認できます。`cache show` は `recover` に渡す `recovery.jsonl` のパスも表示します。`cache clear` / `cache prune` で削除すると、翻訳キャッシュ、Batch artifact、復旧ログが同じ単位で整理されます。出力済み EPUB は削除されません。
 
 ## 同時起動とロック
 

@@ -136,7 +136,56 @@ cargo run -- translate .\book.epub `
   --output .\book_jp.epub
 ```
 
-If the command prints `partial output contains ... cache miss(es)`, untranslated blocks still remain. Check the remaining states with `batch health`, then repeat `reroute-local` and `translate-local` as needed.
+If the command exits with `partial output contains ... cache miss(es)`, untranslated blocks still remain. The output EPUB and untranslated report have already been written. Check the remaining states with `batch health`, then repeat `reroute-local` and `translate-local` as needed.
+
+This condition, `recover` leaving items in `failed.jsonl`, and `scan-recovery` detecting suspicious untranslated blocks all exit with code `2` as recoverable conversion failures. In scripts or CI, treat exit code `2` as "recovery logs are available; continue with recovery" and exit code `1` as a non-recoverable input or environment failure.
+
+If `translate` printed `Recovery log:`, retry only those blocks and write successful translations back into the cache. The recovery log is written under the cache directory as `recovery\<output EPUB name>\recovery.jsonl`. The same directory also contains `untranslated.txt` for human inspection.
+
+```powershell
+$log = ".\.batch-openai-cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
+cargo run -- recover $log --list
+cargo run -- recover $log `
+  --provider ollama `
+  --model qwen3:14b
+```
+
+To rebuild the EPUB as soon as every selected item is recovered, add `--rebuild`. Pass `--output` to write the rebuilt EPUB to a different path.
+
+```powershell
+cargo run -- recover $log --provider ollama --model qwen3:14b --rebuild
+cargo run -- recover --cache .\book.epub --provider ollama --model qwen3:14b --rebuild
+```
+
+To recover only part of the log, filter with `--page`, `--block`, `--reason`, and `--limit`.
+
+```powershell
+cargo run -- recover $log --page 12 --block 3
+cargo run -- recover $log --reason cache_miss --limit 20
+```
+
+If unrecoverable items remain, inspect `failed.jsonl` next to the recovery log and decide whether to retry with another provider/model or intentionally keep the original text.
+
+To inspect the rebuilt EPUB from the outside, use the helper tool `epubtr` to list untranslated candidates:
+
+```powershell
+epubtr -u --detail .\book_jp.epub
+epubtr -u --json .\book_jp.epub
+```
+
+To turn a finished EPUB inspection back into an epubicus recovery log, compare it with the original input using `scan-recovery`.
+
+```powershell
+cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model qwen3:14b
+cargo run -- recover --cache .\book.epub --provider ollama --model qwen3:14b --rebuild
+cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model qwen3:14b --recover --rebuild
+```
+
+For manual spot repairs, write a fixed EPUB without overwriting the current one:
+
+```powershell
+epubtr --output .\book_jp_fixed.epub .\book_jp.epub "original untranslated text" "corrected translation" 1
+```
 
 ## Retry Remotely Instead
 
@@ -164,4 +213,3 @@ If the process still appears active, it will not be unlocked. Use `--force` only
 ```powershell
 cargo run -- unlock .\book.epub --force
 ```
-

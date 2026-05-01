@@ -9,11 +9,6 @@ pub(crate) fn user_prompt(source: &str, glossary_subset: &[GlossaryEntry]) -> St
             prompt.push_str(entry.src.trim());
             prompt.push_str(" => ");
             prompt.push_str(entry.dst.trim());
-            if let Some(kind) = entry.kind.as_deref().filter(|kind| !kind.trim().is_empty()) {
-                prompt.push_str(" (");
-                prompt.push_str(kind.trim());
-                prompt.push(')');
-            }
             prompt.push('\n');
         }
         prompt.push_str("</glossary>\n\n");

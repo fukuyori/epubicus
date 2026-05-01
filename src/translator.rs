@@ -49,20 +49,28 @@ pub(crate) struct TranslationBackend {
     client: Client,
     api_usage: Arc<Mutex<ApiUsage>>,
     adaptive_concurrency: Arc<AdaptiveConcurrency>,
+    verbose: bool,
 }
 
 pub(crate) struct AdaptiveConcurrency {
     pub(crate) current: AtomicUsize,
     max: usize,
     success_streak: AtomicUsize,
+    verbose: bool,
 }
 
 impl AdaptiveConcurrency {
+    #[cfg(test)]
     pub(crate) fn new(max: usize) -> Self {
+        Self::with_verbose(max, false)
+    }
+
+    pub(crate) fn with_verbose(max: usize, verbose: bool) -> Self {
         Self {
             current: AtomicUsize::new(max.max(1)),
             max: max.max(1),
             success_streak: AtomicUsize::new(0),
+            verbose,
         }
     }
 
@@ -80,9 +88,11 @@ impl AdaptiveConcurrency {
             {
                 Ok(_) => {
                     self.success_streak.store(0, Ordering::Relaxed);
-                    eprintln!(
-                        "warning: reducing provider concurrency {current}->{next} after {provider} retryable error: {err}"
-                    );
+                    if self.verbose {
+                        eprintln!(
+                            "warning: reducing provider concurrency {current}->{next} after {provider} retryable error: {err}"
+                        );
+                    }
                     return;
                 }
                 Err(actual) => current = actual.clamp(1, self.max),
@@ -104,9 +114,11 @@ impl AdaptiveConcurrency {
             {
                 Ok(_) => {
                     self.success_streak.store(0, Ordering::Relaxed);
-                    eprintln!(
-                        "warning: increasing provider concurrency {current}->{next} after {streak} successful {provider} request(s)"
-                    );
+                    if self.verbose {
+                        eprintln!(
+                            "warning: increasing provider concurrency {current}->{next} after {streak} successful {provider} request(s)"
+                        );
+                    }
                     return;
                 }
                 Err(actual) => current = actual.clamp(1, self.max),
@@ -125,6 +137,7 @@ pub(crate) struct Translator {
     concurrency: usize,
     pub(crate) fallback_count: usize,
     passthrough_on_validation_failure: bool,
+    verbose: bool,
 }
 
 pub(crate) enum Translation {
@@ -189,8 +202,10 @@ impl Translator {
             None => Vec::new(),
         };
         let concurrency = args.concurrency.max(1);
+        let verbose = args.verbose;
         let api_usage = Arc::new(Mutex::new(ApiUsage::default()));
-        let adaptive_concurrency = Arc::new(AdaptiveConcurrency::new(concurrency));
+        let adaptive_concurrency =
+            Arc::new(AdaptiveConcurrency::with_verbose(concurrency, verbose));
         let ollama_host = args.ollama_host.trim_end_matches('/').to_string();
         let openai_base_url = args.openai_base_url.trim_end_matches('/').to_string();
         let claude_base_url = args.claude_base_url.trim_end_matches('/').to_string();
@@ -238,6 +253,7 @@ impl Translator {
                 client: client.clone(),
                 api_usage: api_usage.clone(),
                 adaptive_concurrency: adaptive_concurrency.clone(),
+                verbose,
             })
         } else {
             None
@@ -260,6 +276,7 @@ impl Translator {
                 client,
                 api_usage,
                 adaptive_concurrency,
+                verbose,
             },
             fallback_backend,
             cache,
@@ -268,6 +285,7 @@ impl Translator {
             concurrency,
             fallback_count: 0,
             passthrough_on_validation_failure: args.passthrough_on_validation_failure,
+            verbose,
         })
     }
 
@@ -360,7 +378,11 @@ impl Translator {
                     }));
                 }
                 Err(err) => {
-                    eprintln!("warning: ignoring invalid cached translation for key {key}: {err}");
+                    if self.verbose {
+                        eprintln!(
+                            "warning: ignoring invalid cached translation for key {key}: {err}"
+                        );
+                    }
                     self.cache.invalidate(&key);
                 }
             }
@@ -386,6 +408,11 @@ impl Translator {
         self.cache
             .peek(&key)
             .is_some_and(|translated| validate_cached_translation(source, translated).is_ok())
+    }
+
+    pub(crate) fn source_cache_key(&self, source: &str) -> String {
+        let glossary_subset = self.backend.glossary_subset(source);
+        self.cache_key(source, &glossary_subset)
     }
 
     fn cache_key(&self, source: &str, glossary_subset: &[GlossaryEntry]) -> String {
@@ -425,19 +452,38 @@ impl Translator {
             glossary_subset,
             key: String::new(),
         };
-        let result =
-            run_translation_job_with_fallback(
-                &self.backend,
-                self.fallback_backend.as_ref(),
-                self.passthrough_on_validation_failure,
-                job,
-            )?;
+        let result = run_translation_job_with_fallback(
+            &self.backend,
+            self.fallback_backend.as_ref(),
+            self.passthrough_on_validation_failure,
+            job,
+        )?;
         Ok((
             result.translated,
             result.provider,
             result.model,
             result.fallback_used,
         ))
+    }
+
+    pub(crate) fn insert_cache_translation(
+        &mut self,
+        key: String,
+        translated: String,
+        provider: Provider,
+        model: String,
+        replace_existing: bool,
+    ) -> Result<()> {
+        if replace_existing {
+            self.cache.invalidate(&key);
+        }
+        self.cache.insert(CacheRecord {
+            key,
+            translated,
+            provider: provider.to_string(),
+            model,
+            at: chrono::Utc::now().to_rfc3339(),
+        })
     }
 }
 
@@ -454,10 +500,12 @@ fn run_translation_job_with_fallback(
             let Some(fallback_backend) = fallback_backend else {
                 return Err(err);
             };
-            eprintln!(
-                "warning: {} returned a refusal/explanation after validation retries; falling back to {} ({})",
-                backend.provider, fallback_backend.provider, fallback_backend.model
-            );
+            if backend.verbose {
+                eprintln!(
+                    "warning: {} returned a refusal/explanation after validation retries; falling back to {} ({})",
+                    backend.provider, fallback_backend.provider, fallback_backend.model
+                );
+            }
             let mut result = fallback_backend.run_translation_job(job).with_context(|| {
                 format!(
                     "fallback translation failed after {} refusal/explanation",
@@ -468,10 +516,12 @@ fn run_translation_job_with_fallback(
             Ok(result)
         }
         Err(err) if passthrough_on_validation_failure && is_translation_validation_error(&err) => {
-            eprintln!(
-                "warning: keeping original source after validation failure from {}: {err}",
-                backend.provider
-            );
+            if backend.verbose {
+                eprintln!(
+                    "warning: keeping original source after validation failure from {}: {err}",
+                    backend.provider
+                );
+            }
             Ok(TranslationJobResult {
                 index: job.index,
                 key: job.key,
@@ -660,12 +710,14 @@ impl TranslationBackend {
                 glossary_subset,
             );
         }
-        eprintln!(
-            "warning: splitting long translation block into {} requests ({} chars, max {} chars per request)",
-            chunks.len(),
-            source.chars().count(),
-            self.max_chars_per_request
-        );
+        if self.verbose {
+            eprintln!(
+                "warning: splitting long translation block into {} requests ({} chars, max {} chars per request)",
+                chunks.len(),
+                source.chars().count(),
+                self.max_chars_per_request
+            );
+        }
         let mut translations = Vec::with_capacity(chunks.len());
         for (idx, chunk) in chunks.iter().enumerate() {
             let chunk_glossary = self.glossary_subset(chunk);
@@ -711,10 +763,12 @@ impl TranslationBackend {
                 Ok(()) => return Ok(translated),
                 Err(err) if attempt < attempts => {
                     let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
-                    eprintln!(
-                        "warning: translation validation failed: {err}; retry {attempt}/{} in {wait_secs}s",
-                        self.retries
-                    );
+                    if self.verbose {
+                        eprintln!(
+                            "warning: translation validation failed: {err}; retry {attempt}/{} in {wait_secs}s",
+                            self.retries
+                        );
+                    }
                     prompt =
                         retry_user_prompt(source, glossary_subset, &translated, &err.to_string());
                     thread::sleep(Duration::from_secs(wait_secs));
@@ -846,10 +900,12 @@ impl TranslationBackend {
                 Err(err) if attempt < attempts && should_retry_request(&err) => {
                     self.adaptive_concurrency.reduce(provider, &err);
                     let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
-                    eprintln!(
-                        "warning: {provider} request failed: {err}; retry {attempt}/{} in {wait_secs}s",
-                        self.retries
-                    );
+                    if self.verbose {
+                        eprintln!(
+                            "warning: {provider} request failed: {err}; retry {attempt}/{} in {wait_secs}s",
+                            self.retries
+                        );
+                    }
                     thread::sleep(Duration::from_secs(wait_secs));
                 }
                 Err(err) => {
@@ -1272,9 +1328,14 @@ pub(crate) fn cache_key(
     hasher.update(style.as_bytes());
     hasher.update(b"\n");
     for entry in glossary_subset {
-        hasher.update(entry.src.as_bytes());
+        let src = entry.src.trim();
+        let dst = entry.dst.trim();
+        if src.is_empty() || dst.is_empty() {
+            continue;
+        }
+        hasher.update(src.as_bytes());
         hasher.update(b"=>");
-        hasher.update(entry.dst.as_bytes());
+        hasher.update(dst.as_bytes());
         hasher.update(b"\n");
     }
     hasher.update(source.as_bytes());

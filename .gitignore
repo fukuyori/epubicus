@@ -1,5 +1,7 @@
 # Rust build artifacts
 /target
+# Keep Cargo verification/build outputs under target-runs; root target-* is ignored
+# only for accidental legacy runs.
 /target-*
 /target-runs/
 

@@ -12,7 +12,8 @@ use quick_xml::{
 };
 
 use crate::{
-    Mode, Translator, epub::is_block_tag, progress::ProgressReporter, translator::Translation,
+    Mode, Translator, epub::is_block_tag, progress::ProgressReporter, recovery::UntranslatedReport,
+    translator::Translation,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -48,6 +49,9 @@ pub(crate) fn translate_xhtml_file(
     translator: &mut Translator,
     mode: Mode,
     mut progress: Option<&mut ProgressReporter>,
+    page_no: usize,
+    href: &str,
+    mut untranslated_report: Option<&mut UntranslatedReport>,
 ) -> Result<usize> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut reader = Reader::from_reader(Cursor::new(source));
@@ -137,6 +141,22 @@ pub(crate) fn translate_xhtml_file(
                             restore_inline_or_original(translated, &inline_map, &inner);
                         if used_translation || translator.dry_run {
                             blocks += 1;
+                        } else if let Some(report) = untranslated_report.as_deref_mut() {
+                            let source = &sources[translation_index];
+                            let record = report.recovery_record(
+                                translator,
+                                "inline_restore_failed",
+                                page_no,
+                                translation_index + 1,
+                                href,
+                                source,
+                                Some("translated inline placeholders could not be restored"),
+                            );
+                            eprintln!(
+                                "recoverable error: p{} b{} {} kept original text ({})",
+                                record.page_no, record.block_index, record.href, record.reason
+                            );
+                            report.record(&record)?;
                         }
                         writer.write_event(Event::Start(start))?;
                         write_events(&mut writer, &restored)?;
@@ -153,6 +173,29 @@ pub(crate) fn translate_xhtml_file(
                         println!("{}", sources[translation_index].trim());
                         println!();
                     } else {
+                        if let Some(report) = untranslated_report.as_deref_mut() {
+                            let source = &sources[translation_index];
+                            let cache_key = translator.source_cache_key(source);
+                            let reason = if translator.cache.peek(&cache_key).is_none() {
+                                "cache_miss"
+                            } else {
+                                "original_output"
+                            };
+                            let record = report.recovery_record(
+                                translator,
+                                reason,
+                                page_no,
+                                translation_index + 1,
+                                href,
+                                source,
+                                None,
+                            );
+                            eprintln!(
+                                "recoverable error: p{} b{} {} kept original text ({})",
+                                record.page_no, record.block_index, record.href, record.reason
+                            );
+                            report.record(&record)?;
+                        }
                         writer.write_event(Event::Start(start))?;
                         write_events(&mut writer, &inner)?;
                         writer.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(

@@ -202,6 +202,60 @@ Create a partial translated EPUB from cache only, leaving cache misses unchanged
 cargo run -- translate .\book.epub -o .\book.partial-ja.epub --partial-from-cache
 ```
 
+To stop an in-progress translation and still finish an EPUB with the work done so far, press `Ctrl+C`, then rebuild with the same input EPUB, the same translation settings, and `--partial-from-cache`. Cached blocks are replaced with translations; missing blocks stay as original source text.
+
+Example for an OpenAI Batch cache:
+
+```powershell
+cargo run -- translate .\book.epub `
+  --cache-root .\.batch-openai-cache `
+  --provider openai `
+  --model gpt-5-mini `
+  --glossary .\glossary.json `
+  --partial-from-cache `
+  --keep-cache `
+  --output .\book_jp.epub
+```
+
+Example for a local Ollama cache:
+
+```powershell
+cargo run -- translate .\book.epub `
+  --cache-root .\.local-ollama-cache `
+  --provider ollama `
+  --model qwen3:14b `
+  --partial-from-cache `
+  --keep-cache `
+  --output .\book_jp.epub
+```
+
+If any block is written unchanged, epubicus writes `recovery\<output EPUB name>\untranslated.txt` under the cache directory. Use that file after noisy runs to inspect the page number, XHTML href, reason, and original source block for each untranslated output block. Because it lives with the cache, `cache clear` / `cache prune` can clean translation cache, batch artifacts, and recovery logs together.
+
+epubicus also writes `recovery\<output EPUB name>\recovery.jsonl`. The exact path is printed at the end of `translate` as `Recovery log:`. Use the `recover` subcommand to retry only those blocks and insert successful translations back into the normal cache.
+
+```powershell
+$log = ".\.local-ollama-cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
+cargo run -- recover $log
+```
+
+To recover and rebuild in one step, pass `--rebuild`. When every selected item is recovered, epubicus rebuilds the EPUB from cache with `--partial-from-cache` and the output path recorded in the recovery log.
+
+```powershell
+cargo run -- recover $log --rebuild
+```
+
+Pass `--output` to write the rebuilt EPUB elsewhere. To rebuild manually instead, run:
+
+```powershell
+cargo run -- translate .\book.epub `
+  --cache-root .\.local-ollama-cache `
+  --partial-from-cache `
+  --keep-cache `
+  --output .\book_jp.epub
+```
+
+If some items still cannot be recovered, epubicus writes `failed.jsonl` next to the recovery log and prints the page number, block, href, reason, last error, and cache key. To retry with another provider or model, pass `--provider` / `--model` to `recover`.
+
 Use the same provider, model, style, and glossary as the interrupted run because they are part of the cache key.
 
 ```powershell
@@ -312,7 +366,9 @@ cargo run -- batch translate-local .\book.epub --provider ollama --model qwen3:1
 | `-o, --output PATH` | `<input>.ja.epub` | Output EPUB |
 | `--from N` | first spine item | First 1-based OPF spine number to translate |
 | `--to N` | last spine item | Last 1-based OPF spine number to translate |
-| `--partial-from-cache` | false | Replace cache hits with translations and keep cache misses unchanged |
+| `--partial-from-cache` | false | Replace cache hits with translations and keep cache misses unchanged. If untranslated blocks remain, write the EPUB and report, then exit with an error |
+
+When an EPUB and recovery log were written but untranslated blocks remain, `recover` leaves unrecoverable items in `failed.jsonl`, or `scan-recovery` detects suspicious untranslated blocks and writes a recovery log, epubicus exits with code `2` for a recoverable error. Non-recoverable failures such as invalid input EPUBs or unwritable output paths use the normal error code `1`.
 
 ### `test`
 
@@ -352,6 +408,54 @@ CLI arguments take precedence over environment variables.
 | `-k, --keep-cache` | none | false | Keep the cache after a successful completion (default: cache is auto-deleted) |
 | `-u, --usage-only` | none | false | Do not call a provider; only print estimated API requests and tokens for the selected pages |
 | `--passthrough-on-validation-failure` | `EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE` | false | Keep the original block in the current output after validation retries are exhausted. It is not cached, so it can be retried later. Useful for TOC/index entries where preserving links and inline structure is safer than aborting |
+| `--verbose` | `EPUBICUS_VERBOSE` | false | Show detailed processing warnings such as retries, concurrency changes, fallback use, and long-block splitting |
+
+### `recover`
+
+| Option | Default | Description |
+|--|--|--|
+| `LOG` | required unless `--cache` is used | `recovery.jsonl` printed by `translate` as `Recovery log:` |
+| `--cache TARGET` | none | Resolve the newest `recovery.jsonl` from an input EPUB path or cache hash prefix |
+| `--input PATH` | `input_epub` from the recovery log | Explicit input EPUB |
+| `--limit N` | all items | Maximum number of items to retry |
+| `--list` | false | List matching recovery log items without translating |
+| `--page N` | all pages | Only include records for this spine page |
+| `--block N` | all blocks | Only include records for this block index |
+| `--reason REASON` | all reasons | Only include records with this reason. Can be repeated |
+| `--failed-log PATH` | `<LOG directory>\failed.jsonl` | Output path for unrecoverable items |
+| `--rebuild` | false | Rebuild the EPUB from cache when every selected item is recovered |
+| `--output PATH` | `output_epub` from the recovery log | Output EPUB path for `--rebuild` |
+
+Examples:
+
+```powershell
+cargo run -- recover $log --list
+cargo run -- recover $log --page 12 --block 3
+cargo run -- recover $log --reason cache_miss --limit 20
+cargo run -- recover $log --rebuild
+cargo run -- recover --cache .\book.epub --rebuild
+```
+
+### `scan-recovery`
+
+Compare a finished or partial EPUB with the original input EPUB and write `recovery.jsonl` for blocks that still look untranslated. The files are written under the input EPUB cache, using the same `recovery\<output EPUB name>\` layout as normal partial output recovery logs.
+
+| Option | Default | Description |
+|--|--|--|
+| `INPUT` | required | Original input EPUB |
+| `OUTPUT` | required | Translated or partially translated EPUB to inspect |
+| `--limit N` | all items | Maximum number of suspicious blocks to record |
+| `--recover` | false | Retry detected blocks immediately after writing the recovery log |
+| `--rebuild` | false | Rebuild the inspected EPUB after `--recover` succeeds |
+| `--failed-log PATH` | `<recovery log directory>\failed.jsonl` | Output path for unrecoverable items during `--recover` |
+
+Examples:
+
+```powershell
+cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model qwen3:14b
+cargo run -- recover --cache .\book.epub --rebuild
+cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model qwen3:14b --recover --rebuild
+```
 
 Provider-specific `--model` defaults:
 
@@ -378,8 +482,8 @@ Provider-specific `--model` defaults:
 
 | Subcommand | Description |
 |--|--|
-| `cache list` | List all cached runs with hash, segment count, size, last update, and input path |
-| `cache show <hash\|input.epub>` | Print the manifest for one run (resolved by hash prefix or input EPUB path) |
+| `cache list` | List all cached runs with hash, segment count, recovery log count, size, last update, and input path |
+| `cache show <hash\|input.epub>` | Print the manifest plus recovery log locations and counts, including the `recovery.jsonl` path to pass to `recover` |
 | `cache prune --older-than <DAYS> [--yes] [--dry-run]` | Delete runs whose `last_updated_at` is older than N days |
 | `cache clear --hash <HASH> [--dry-run]` | Delete one cached run |
 | `cache clear --all [--yes] [--dry-run]` | Delete every cached run. Requires typing `yes` unless `--yes` is set |
@@ -445,7 +549,7 @@ You can also write a prompt for reviewing the candidates with ChatGPT or Claude:
 cargo run -- glossary .\book.epub -o .\glossary.candidates.json --review-prompt .\glossary-review.md
 ```
 
-Send `glossary-review.md` to ChatGPT or Claude, then save the returned JSON as `glossary.json` and use it for translation. The prompt asks the model to remove false positives, merge duplicates, classify entries such as `person`, `place`, `organization`, or `term`, and fill Japanese `dst` suggestions.
+Send `glossary-review.md` to ChatGPT or Claude, then save the returned JSON as `glossary.json` and use it for translation. The prompt asks the model to remove false positives, merge duplicates, and fill Japanese `dst` suggestions.
 
 `glossary-review.md` is self-contained: it includes explanatory comments, field meanings, review rules, and the candidate JSON, so it can be pasted directly into ChatGPT or Claude. `glossary.candidates.json` remains valid comment-free JSON.
 
@@ -458,9 +562,7 @@ Edit `dst` values:
   "entries": [
     {
       "src": "Horizon",
-      "dst": "ホライゾン",
-      "kind": "term",
-      "note": "occurrences: 793"
+      "dst": "ホライゾン"
     }
   ]
 }
@@ -473,6 +575,7 @@ cargo run -- translate .\book.epub -o .\book.ja.epub --glossary .\glossary.json
 ```
 
 Only entries whose `src` appears in the current block are sent to the provider, so the prompt does not include the entire glossary every time.
+During translation, the provider only receives `src => dst`. Existing glossary files may still contain `kind` and `note`, but they are not included in the translation prompt. Leading/trailing whitespace in `src` / `dst` is ignored, and entries with an empty `dst` are not used during translation.
 
 ## Current Scope
 
@@ -501,7 +604,7 @@ Only entries whose `src` appears in the current block are sent to the provider, 
 ## Limitations
 
 - EPUB reader page numbers are not used. Ranges are OPF spine numbers.
-- `--partial-from-cache` does not call a model, replaces cache hits with translated text, and leaves cache misses unchanged. It cannot be combined with `--no-cache`.
+- `--partial-from-cache` does not call a model, replaces cache hits with translated text, and leaves cache misses unchanged. If untranslated blocks remain, the command exits with an error after writing the EPUB and untranslated report. It cannot be combined with `--no-cache`.
 - `nav.xhtml` / NCX display is implemented, but TOC translation is not implemented yet.
 - Detailed fallback reports are not implemented yet.
 - Code/preformatted content is protected from translation.

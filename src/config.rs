@@ -39,6 +39,10 @@ pub(crate) enum Commands {
     Cache(CacheArgs),
     /// Prepare and manage asynchronous batch translation artifacts.
     Batch(BatchArgs),
+    /// Retry recoverable translation errors recorded in a recovery log.
+    Recover(RecoverArgs),
+    /// Scan a rebuilt EPUB and write recovery logs for suspicious untranslated blocks.
+    ScanRecovery(ScanRecoveryArgs),
     /// Remove a stale input-use flag for an EPUB.
     Unlock(UnlockArgs),
 }
@@ -129,6 +133,9 @@ pub(crate) struct CommonArgs {
     /// After validation retries are exhausted, keep the original block instead of aborting.
     #[arg(long, env = "EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE")]
     pub(crate) passthrough_on_validation_failure: bool,
+    /// Show detailed warnings while processing.
+    #[arg(long, env = "EPUBICUS_VERBOSE")]
+    pub(crate) verbose: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -219,6 +226,66 @@ pub(crate) struct UnlockArgs {
     /// Remove the flag even if the recorded process still appears to be running.
     #[arg(long)]
     pub(crate) force: bool,
+}
+
+#[derive(Parser)]
+pub(crate) struct RecoverArgs {
+    /// Recovery JSONL written next to a partial output EPUB.
+    pub(crate) log: Option<PathBuf>,
+    /// Resolve the newest recovery.jsonl from a cached run by input EPUB path or cache hash prefix.
+    #[arg(long = "cache", conflicts_with = "log")]
+    pub(crate) cache_target: Option<String>,
+    /// Input EPUB. Defaults to the first input_epub recorded in the log.
+    #[arg(long)]
+    pub(crate) input: Option<PathBuf>,
+    /// Maximum number of log items to retry.
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
+    /// List matching recovery log items without translating.
+    #[arg(long)]
+    pub(crate) list: bool,
+    /// Only include records for this spine page number.
+    #[arg(long)]
+    pub(crate) page: Option<usize>,
+    /// Only include records for this block index.
+    #[arg(long)]
+    pub(crate) block: Option<usize>,
+    /// Only include records with this reason. Can be repeated.
+    #[arg(long = "reason")]
+    pub(crate) reasons: Vec<String>,
+    /// Failed-item JSONL path. Defaults to <log stem>.failed.jsonl.
+    #[arg(long)]
+    pub(crate) failed_log: Option<PathBuf>,
+    /// Rebuild the EPUB from cache after every selected item is recovered.
+    #[arg(long)]
+    pub(crate) rebuild: bool,
+    /// Output EPUB path for --rebuild. Defaults to the output_epub recorded in the log.
+    #[arg(short, long)]
+    pub(crate) output: Option<PathBuf>,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+#[derive(Parser)]
+pub(crate) struct ScanRecoveryArgs {
+    /// Original input EPUB.
+    pub(crate) input: PathBuf,
+    /// Translated or partially translated EPUB to inspect.
+    pub(crate) output: PathBuf,
+    /// Maximum number of suspicious blocks to record.
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
+    /// After writing the recovery log, retry the suspicious blocks immediately.
+    #[arg(long)]
+    pub(crate) recover: bool,
+    /// Rebuild the inspected EPUB after --recover succeeds.
+    #[arg(long, requires = "recover")]
+    pub(crate) rebuild: bool,
+    /// Failed-item JSONL path for --recover. Defaults to <recovery log directory>\failed.jsonl.
+    #[arg(long, requires = "recover")]
+    pub(crate) failed_log: Option<PathBuf>,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
 }
 
 #[derive(Parser)]

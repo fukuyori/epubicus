@@ -34,27 +34,13 @@ pub(crate) struct GlossaryEntry {
 struct GlossaryCandidate {
     term: String,
     count: usize,
-    kind: String,
 }
 
 pub(crate) fn glossary_command(args: GlossaryArgs) -> Result<()> {
     let _run_lock = acquire_input_run_lock(&args.input, "glossary input EPUB")?;
     let book = unpack_epub(&args.input)?;
     let candidates = extract_glossary_candidates(&book, args.min_occurrences, args.max_entries)?;
-    let glossary = GlossaryFile {
-        model: None,
-        source_lang: Some("en".to_string()),
-        target_lang: Some("ja".to_string()),
-        entries: candidates
-            .into_iter()
-            .map(|candidate| GlossaryEntry {
-                src: candidate.term,
-                dst: String::new(),
-                kind: Some(candidate.kind),
-                note: Some(format!("occurrences: {}", candidate.count)),
-            })
-            .collect(),
-    };
+    let glossary = glossary_from_candidates(candidates);
     let json = serde_json::to_string_pretty(&glossary)?;
     fs::write(&args.output, json)
         .with_context(|| format!("failed to write {}", args.output.display()))?;
@@ -69,6 +55,23 @@ pub(crate) fn glossary_command(args: GlossaryArgs) -> Result<()> {
         args.output.display()
     );
     Ok(())
+}
+
+fn glossary_from_candidates(candidates: Vec<GlossaryCandidate>) -> GlossaryFile {
+    GlossaryFile {
+        model: None,
+        source_lang: Some("en".to_string()),
+        target_lang: Some("ja".to_string()),
+        entries: candidates
+            .into_iter()
+            .map(|candidate| GlossaryEntry {
+                src: candidate.term,
+                dst: String::new(),
+                kind: None,
+                note: None,
+            })
+            .collect(),
+    }
 }
 
 fn glossary_review_prompt(glossary: &GlossaryFile) -> String {
@@ -86,9 +89,7 @@ fn glossary_review_prompt(glossary: &GlossaryFile) -> String {
 ## 入力 JSON の見方
 
 - `src`: 原文に出てきた英語表記です。
-- `dst`: 日本語訳語です。空欄なので、自然で一貫した訳語を入れてください。
-- `kind`: 候補の種類です。必要に応じて修正してください。
-- `note`: 出現回数などのコメントです。判断材料として使い、必要なら短い補足コメントに直してください。
+- `dst`: 日本語訳語です。空欄なので、自然で一貫した訳語を入れてください。翻訳時に使われるのは `src` と `dst` だけです。
 
 ## 修正方針
 
@@ -96,8 +97,6 @@ fn glossary_review_prompt(glossary: &GlossaryFile) -> String {
 - 誤検出、章見出し、一般語、文頭に多いだけの単語は削除してください。
 - 同じ対象を指す表記ゆれや重複は、最も標準的な `src` に統合してください。
 - `dst` には、文脈上自然な日本語訳または一般的なカタカナ表記を入れてください。
-- `kind` は次のいずれかにしてください: `person`, `place`, `organization`, `product`, `term`, `work`, `other`
-- 判断に迷う候補は、残す場合だけ `note` に短い理由を入れてください。
 - 出力は有効な JSON のみ。Markdown のコードフェンスや説明文は付けないでください。
 - JSON の形は `source_lang`, `target_lang`, `entries` を維持してください。
 
@@ -126,11 +125,7 @@ fn extract_glossary_candidates(
         .into_iter()
         .filter(|(_, count)| *count >= min_occurrences)
         .filter(|(term, _)| !is_glossary_stopword(term))
-        .map(|(term, count)| GlossaryCandidate {
-            kind: infer_glossary_kind(&term).to_string(),
-            term,
-            count,
-        })
+        .map(|(term, count)| GlossaryCandidate { term, count })
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
         b.count
@@ -263,18 +258,108 @@ fn is_glossary_stopword(term: &str) -> bool {
         )
 }
 
-fn infer_glossary_kind(term: &str) -> &'static str {
-    if term.split_whitespace().count() >= 2 {
-        "proper-noun"
-    } else {
-        "term"
-    }
-}
-
 pub(crate) fn load_glossary(path: &Path) -> Result<Vec<GlossaryEntry>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read glossary {}", path.display()))?;
     let glossary: GlossaryFile = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse glossary {}", path.display()))?;
-    Ok(glossary.entries)
+    Ok(glossary
+        .entries
+        .into_iter()
+        .map(|mut entry| {
+            entry.src = entry.src.trim().to_string();
+            entry.dst = entry.dst.trim().to_string();
+            entry
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glossary_review_prompt_asks_for_dst_only() {
+        let glossary = GlossaryFile {
+            model: None,
+            source_lang: Some("en".to_string()),
+            target_lang: Some("ja".to_string()),
+            entries: vec![GlossaryEntry {
+                src: "Horizon".to_string(),
+                dst: String::new(),
+                kind: None,
+                note: None,
+            }],
+        };
+
+        let prompt = glossary_review_prompt(&glossary);
+
+        assert!(prompt.contains("`dst`"));
+        assert!(!prompt.contains("`kind`"));
+        assert!(!prompt.contains("`note`"));
+        assert!(prompt.contains("\"src\": \"Horizon\""));
+        assert!(prompt.contains("\"dst\": \"\""));
+    }
+
+    #[test]
+    fn generated_glossary_entries_only_emit_src_and_dst() {
+        let glossary = glossary_from_candidates(vec![GlossaryCandidate {
+            term: "Horizon".to_string(),
+            count: 3,
+        }]);
+
+        let json = serde_json::to_string_pretty(&glossary).unwrap();
+
+        assert!(json.contains("\"src\": \"Horizon\""));
+        assert!(json.contains("\"dst\": \"\""));
+        assert!(!json.contains("\"kind\""));
+        assert!(!json.contains("\"note\""));
+    }
+
+    #[test]
+    fn legacy_kind_and_note_are_still_readable() {
+        let glossary: GlossaryFile = serde_json::from_str(
+            r#"{
+  "source_lang": "en",
+  "target_lang": "ja",
+  "entries": [
+    {
+      "src": "Horizon",
+      "dst": "ホライゾン",
+      "kind": "term",
+      "note": "old note"
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(glossary.entries[0].src, "Horizon");
+        assert_eq!(glossary.entries[0].dst, "ホライゾン");
+        assert_eq!(glossary.entries[0].kind.as_deref(), Some("term"));
+        assert_eq!(glossary.entries[0].note.as_deref(), Some("old note"));
+    }
+
+    #[test]
+    fn loaded_glossary_trims_src_and_dst() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("glossary.json");
+        fs::write(
+            &path,
+            r#"{
+  "entries": [
+    {
+      "src": " Horizon ",
+      "dst": " ホライゾン "
+    }
+  ]
+}"#,
+        )?;
+
+        let entries = load_glossary(&path)?;
+
+        assert_eq!(entries[0].src, "Horizon");
+        assert_eq!(entries[0].dst, "ホライゾン");
+        Ok(())
+    }
 }

@@ -71,6 +71,8 @@ pub(crate) struct ManifestTimestamps {
 
 pub(crate) struct CacheStore {
     pub(crate) enabled: bool,
+    /// Cache root directory containing per-EPUB cache directories.
+    pub(crate) root: PathBuf,
     /// Per-EPUB cache directory: <cache_root>/<input_hash>/. Always populated, even when enabled=false,
     /// so callers can refer to it for diagnostics.
     pub(crate) dir: PathBuf,
@@ -106,6 +108,7 @@ impl CacheStore {
         if args.no_cache {
             return Ok(Self {
                 enabled: false,
+                root,
                 dir,
                 translations_path,
                 manifest_path,
@@ -122,6 +125,7 @@ impl CacheStore {
         let entries = read_cache_entries(&translations_path)?;
         Ok(Self {
             enabled: true,
+            root,
             dir,
             translations_path,
             manifest_path,
@@ -350,9 +354,14 @@ pub(crate) fn glossary_sha(entries: &[GlossaryEntry]) -> String {
     }
     let mut hasher = Sha256::new();
     for e in entries {
-        hasher.update(e.src.as_bytes());
+        let src = e.src.trim();
+        let dst = e.dst.trim();
+        if src.is_empty() || dst.is_empty() {
+            continue;
+        }
+        hasher.update(src.as_bytes());
         hasher.update(b"=>");
-        hasher.update(e.dst.as_bytes());
+        hasher.update(dst.as_bytes());
         hasher.update(b"\n");
     }
     let digest = hasher.finalize();
@@ -413,6 +422,7 @@ mod tests {
             usage_only: false,
             partial_from_cache: false,
             passthrough_on_validation_failure: false,
+            verbose: false,
             dry_run: false,
         }
     }
@@ -480,6 +490,82 @@ mod tests {
         assert!(!cache.lock_path.starts_with(&cache.dir));
         Ok(())
     }
+
+    #[test]
+    fn cache_entry_reports_recovery_logs() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cache_dir = dir.path().join("cache").join("abcdef");
+        let recovery_dir = cache_dir.join("recovery").join("book_jp");
+        fs::create_dir_all(&recovery_dir)?;
+        fs::write(
+            recovery_dir.join("recovery.jsonl"),
+            "{\"kind\":\"recoverable_error\"}\n{\"kind\":\"recoverable_error\"}\n",
+        )?;
+        fs::write(
+            recovery_dir.join("failed.jsonl"),
+            "{\"kind\":\"recoverable_error\"}\n",
+        )?;
+
+        let info = collect_recovery_cache_info(&cache_dir)?;
+
+        assert_eq!(info.logs, 1);
+        assert_eq!(info.items, 2);
+        assert_eq!(info.failed_items, 1);
+        assert_eq!(info.details.len(), 1);
+        assert_eq!(info.details[0].name, "book_jp");
+        assert_eq!(info.details[0].items, 2);
+        assert_eq!(info.details[0].failed_items, 1);
+        assert_eq!(
+            info.details[0].recovery_log,
+            recovery_dir.join("recovery.jsonl")
+        );
+        assert_eq!(
+            info.details[0].failed_log.as_deref(),
+            Some(recovery_dir.join("failed.jsonl").as_path())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn newest_recovery_log_resolves_from_cache_hash() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cache_root = dir.path().join("cache");
+        let recovery_dir = cache_root.join("abcdef").join("recovery").join("book_jp");
+        fs::create_dir_all(&recovery_dir)?;
+        let recovery_log = recovery_dir.join("recovery.jsonl");
+        fs::write(&recovery_log, "{\"kind\":\"recoverable_error\"}\n")?;
+
+        let resolved = newest_recovery_log_for_target(Some(&cache_root), "abc")?;
+
+        assert_eq!(resolved, recovery_log);
+        Ok(())
+    }
+
+    #[test]
+    fn glossary_sha_uses_trimmed_src_dst_only() {
+        let entries_a = vec![GlossaryEntry {
+            src: "Horizon".to_string(),
+            dst: "ホライゾン".to_string(),
+            kind: None,
+            note: None,
+        }];
+        let entries_b = vec![
+            GlossaryEntry {
+                src: " Horizon ".to_string(),
+                dst: " ホライゾン ".to_string(),
+                kind: Some("ignored".to_string()),
+                note: Some("ignored".to_string()),
+            },
+            GlossaryEntry {
+                src: "Unfilled".to_string(),
+                dst: String::new(),
+                kind: None,
+                note: None,
+            },
+        ];
+
+        assert_eq!(glossary_sha(&entries_a), glossary_sha(&entries_b));
+    }
 }
 
 #[derive(Debug)]
@@ -488,7 +574,29 @@ struct CacheEntryInfo {
     pub(crate) dir: PathBuf,
     manifest: Option<Manifest>,
     cached_segments: usize,
+    recovery_logs: usize,
+    recovery_items: usize,
+    failed_recovery_items: usize,
+    recovery_log_details: Vec<RecoveryLogInfo>,
     pub(crate) size_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct RecoveryCacheInfo {
+    logs: usize,
+    items: usize,
+    failed_items: usize,
+    details: Vec<RecoveryLogInfo>,
+}
+
+#[derive(Debug)]
+struct RecoveryLogInfo {
+    name: String,
+    recovery_log: PathBuf,
+    untranslated_report: Option<PathBuf>,
+    failed_log: Option<PathBuf>,
+    items: usize,
+    failed_items: usize,
 }
 
 fn collect_cache_entries(root: &Path) -> Result<Vec<CacheEntryInfo>> {
@@ -521,12 +629,17 @@ fn collect_cache_entries(root: &Path) -> Result<Vec<CacheEntryInfo>> {
         } else {
             0
         };
+        let recovery = collect_recovery_cache_info(&dir).unwrap_or_default();
         let size_bytes = directory_size(&dir).unwrap_or(0);
         out.push(CacheEntryInfo {
             hash,
             dir,
             manifest,
             cached_segments,
+            recovery_logs: recovery.logs,
+            recovery_items: recovery.items,
+            failed_recovery_items: recovery.failed_items,
+            recovery_log_details: recovery.details,
             size_bytes,
         });
     }
@@ -544,6 +657,50 @@ fn collect_cache_entries(root: &Path) -> Result<Vec<CacheEntryInfo>> {
         bb.cmp(&aa)
     });
     Ok(out)
+}
+
+fn collect_recovery_cache_info(cache_dir: &Path) -> Result<RecoveryCacheInfo> {
+    let recovery_dir = cache_dir.join("recovery");
+    if !recovery_dir.exists() {
+        return Ok(RecoveryCacheInfo::default());
+    }
+    let mut info = RecoveryCacheInfo::default();
+    for entry in fs::read_dir(&recovery_dir)
+        .with_context(|| format!("failed to read recovery dir {}", recovery_dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let recovery_log = dir.join("recovery.jsonl");
+        let mut items = 0usize;
+        if recovery_log.exists() {
+            info.logs += 1;
+            items = count_jsonl_lines(&recovery_log).unwrap_or(0);
+            info.items += items;
+        }
+        let failed_log = dir.join("failed.jsonl");
+        let mut failed_items = 0usize;
+        if failed_log.exists() {
+            failed_items = count_jsonl_lines(&failed_log).unwrap_or(0);
+            info.failed_items += failed_items;
+        }
+        if recovery_log.exists() || failed_log.exists() {
+            let untranslated_report = dir.join("untranslated.txt");
+            info.details.push(RecoveryLogInfo {
+                name,
+                recovery_log,
+                untranslated_report: untranslated_report.exists().then_some(untranslated_report),
+                failed_log: failed_log.exists().then_some(failed_log),
+                items,
+                failed_items,
+            });
+        }
+    }
+    info.details.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(info)
 }
 
 fn count_jsonl_lines(path: &Path) -> Result<usize> {
@@ -595,10 +752,10 @@ fn cache_list(root: &Path) -> Result<()> {
     }
     println!();
     println!(
-        "{:<32}  {:>8}  {:>10}  {:<25}  {}",
-        "Hash", "Segs", "Size", "Last Updated", "Input"
+        "{:<32}  {:>8}  {:>12}  {:>10}  {:<25}  {}",
+        "Hash", "Segs", "Recovery", "Size", "Last Updated", "Input"
     );
-    println!("{}", "-".repeat(110));
+    println!("{}", "-".repeat(124));
     for e in &entries {
         let last = e
             .manifest
@@ -611,9 +768,10 @@ fn cache_list(root: &Path) -> Result<()> {
             .map(|m| m.input.path_when_started.as_str())
             .unwrap_or("(no manifest)");
         println!(
-            "{:<32}  {:>8}  {:>10}  {:<25}  {}",
+            "{:<32}  {:>8}  {:>12}  {:>10}  {:<25}  {}",
             e.hash,
             e.cached_segments,
+            format_recovery_summary(e),
             human_bytes(e.size_bytes),
             last,
             input,
@@ -631,6 +789,30 @@ fn cache_show(root: &Path, target: &str) -> Result<()> {
     println!("Directory:  {}", entry.dir.display());
     println!("Size:       {}", human_bytes(entry.size_bytes));
     println!("Segments:   {}", entry.cached_segments);
+    println!(
+        "Recovery:   {} log(s), {} item(s), {} failed item(s)",
+        entry.recovery_logs, entry.recovery_items, entry.failed_recovery_items
+    );
+    if entry.recovery_logs > 0 {
+        println!(
+            "Recovery directory: {}",
+            entry.dir.join("recovery").display()
+        );
+        println!("Recovery logs:");
+        for log in &entry.recovery_log_details {
+            println!(
+                "  - {}: {} item(s), {} failed item(s)",
+                log.name, log.items, log.failed_items
+            );
+            println!("    recover: {}", log.recovery_log.display());
+            if let Some(report) = &log.untranslated_report {
+                println!("    report:  {}", report.display());
+            }
+            if let Some(failed) = &log.failed_log {
+                println!("    failed:  {}", failed.display());
+            }
+        }
+    }
     if let Some(manifest) = &entry.manifest {
         println!();
         let pretty = serde_json::to_string_pretty(manifest)?;
@@ -639,6 +821,27 @@ fn cache_show(root: &Path, target: &str) -> Result<()> {
         println!("(manifest.json missing)");
     }
     Ok(())
+}
+
+pub(crate) fn newest_recovery_log_for_target(
+    cache_root: Option<&Path>,
+    target: &str,
+) -> Result<PathBuf> {
+    let root = resolve_cache_root(cache_root)?;
+    let entry = resolve_cache_target(&root, target)?;
+    entry
+        .recovery_log_details
+        .iter()
+        .filter(|detail| detail.recovery_log.exists())
+        .max_by_key(|detail| {
+            detail
+                .recovery_log
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
+        .map(|detail| detail.recovery_log.clone())
+        .with_context(|| format!("cached run {} has no recovery.jsonl", entry.hash))
 }
 
 fn resolve_cache_target(root: &Path, target: &str) -> Result<CacheEntryInfo> {
@@ -704,9 +907,10 @@ fn cache_prune(root: &Path, older_than_days: u64, yes: bool, dry_run: bool) -> R
             .map(|m| m.timestamps.last_updated_at.as_str())
             .unwrap_or("-");
         println!(
-            "  - {} ({}, last updated {})",
+            "  - {} ({}, recovery {}, last updated {})",
             v.hash,
             human_bytes(v.size_bytes),
+            format_recovery_summary(v),
             last
         );
     }
@@ -767,9 +971,10 @@ fn cache_clear(root: &Path, hash: Option<&str>, all: bool, yes: bool, dry_run: b
                 .map(|m| m.input.path_when_started.as_str())
                 .unwrap_or("(no manifest)");
             println!(
-                "  - {} ({}, last {}) {}",
+                "  - {} ({}, recovery {}, last {}) {}",
                 e.hash,
                 human_bytes(e.size_bytes),
+                format_recovery_summary(e),
                 last,
                 input,
             );
@@ -820,4 +1025,18 @@ fn cache_clear(root: &Path, hash: Option<&str>, all: bool, yes: bool, dry_run: b
         human_bytes(entry.size_bytes)
     );
     Ok(())
+}
+
+fn format_recovery_summary(entry: &CacheEntryInfo) -> String {
+    if entry.recovery_logs == 0 && entry.failed_recovery_items == 0 {
+        return "-".to_string();
+    }
+    if entry.failed_recovery_items > 0 {
+        format!(
+            "{}/{}+{}f",
+            entry.recovery_logs, entry.recovery_items, entry.failed_recovery_items
+        )
+    } else {
+        format!("{}/{}", entry.recovery_logs, entry.recovery_items)
+    }
 }
