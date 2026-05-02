@@ -185,7 +185,7 @@ cargo run -- batch     <SUBCOMMAND>
 cargo run -- cache     <SUBCOMMAND>
 ```
 
-`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数、未キャッシュブロックの provider リクエスト進捗をプログレスバーに表示します。ETA は provider が実際に翻訳した未キャッシュ原文文字数の累積平均から単純に計算するため、長時間の実行ほど目安として落ち着きます。初期の小さな前付けページからまとまった本文バッチに入った時だけ、ETA の基準を一度だけ取り直します。OpenAI / Claude など provider が usage を返す場合は、終了時に API リクエスト数と input / output / total tokens を表示します。
+`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数、未キャッシュブロックの provider リクエスト進捗をプログレスバーに表示します。ETA は現在の実行、または再開した時点から測ります。開始時に未キャッシュ原文文字数を数え、provider が完了した未キャッシュ文字数と経過時間の累積平均から、残りの未キャッシュ文字数を単純に予測します。以前の実行でキャッシュ済みだった分は進捗位置には反映しますが、ETA の分母には入れません。OpenAI / Claude など provider が usage を返す場合は、終了時に API リクエスト数と input / output / total tokens を表示します。
 
 `test` は指定 spine 範囲の翻訳結果を標準出力に表示します。EPUB は作成しません。
 

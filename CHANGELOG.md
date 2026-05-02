@@ -2,6 +2,12 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.3.8 - 2026-05-03
+
+### Changed
+
+- Simplified ETA calculation so resumed runs measure only the uncached source characters counted at startup, using the current run's provider elapsed time and completed uncached characters.
+
 ## 0.3.7 - 2026-05-02
 
 ### Added
@@ -10,7 +16,7 @@ All notable changes to epubicus are documented in this file.
 
 ### Changed
 
-- ETA now uses a cumulative provider-time average per completed uncached source character, with a one-time baseline reset when the first substantial provider batch starts.
+- ETA now measures from the current run or resume point using the uncached source characters counted at startup, without carrying cached work or later baseline adjustments into the estimate.
 - Validation failures now carry machine-readable reasons, and retry prompts use those reasons to give targeted, generic English correction instructions.
 
 ### Fixed

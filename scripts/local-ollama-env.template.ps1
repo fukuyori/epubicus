@@ -68,7 +68,7 @@ $env:EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE = "true"
 
 # Ollama is usually safest at 1 while validating output quality.
 # Increase only if the local model/server has enough headroom.
-$env:EPUBICUS_CONCURRENCY = "2"
+$env:EPUBICUS_CONCURRENCY = "3"
 
 function New-EpubicusLocalTranslateArgs {
     param(

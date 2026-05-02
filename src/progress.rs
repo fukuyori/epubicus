@@ -5,8 +5,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::Stats;
 
-const ETA_BODY_BATCH_MIN_BLOCKS: usize = 32;
-
 pub(crate) struct ProgressReporter {
     bar: ProgressBar,
     total_blocks: u64,
@@ -15,7 +13,6 @@ pub(crate) struct ProgressReporter {
     model_chars: usize,
     started: Instant,
     model_started: Option<Instant>,
-    eta_body_aligned: bool,
     page_message: String,
     work_message: Option<String>,
 }
@@ -44,7 +41,6 @@ impl ProgressReporter {
             model_chars: 0,
             started: Instant::now(),
             model_started: None,
-            eta_body_aligned: false,
             page_message: if cached_blocks > 0 {
                 format!("resume c{cached_blocks}/{total_blocks}")
             } else {
@@ -85,7 +81,7 @@ impl ProgressReporter {
             self.work_message = None;
         } else {
             if completed == 0 {
-                self.start_provider_batch(total);
+                self.start_provider_batch();
             }
             self.work_message = Some(format!("req {completed}/{total} x{concurrency}"));
         }
@@ -139,12 +135,11 @@ impl ProgressReporter {
         if remaining == 0 {
             return "ETA done".to_string();
         }
-        let elapsed = self.started.elapsed();
         let model_elapsed = self
             .model_started
             .map(|started| started.elapsed())
-            .unwrap_or(elapsed);
-        let Some(seconds_per_char) = self.seconds_per_model_char(model_elapsed) else {
+            .unwrap_or_else(|| self.started.elapsed());
+        let Some(seconds_per_char) = seconds_per_unit(model_elapsed, self.model_chars) else {
             return "ETA pending".to_string();
         };
         let eta = Duration::from_secs_f64(seconds_per_char * remaining as f64);
@@ -152,27 +147,16 @@ impl ProgressReporter {
     }
 
     fn record_model_chars(&mut self, source_chars: usize) {
-        let now = Instant::now();
         if self.model_started.is_none() {
-            self.model_started = Some(now);
+            self.model_started = Some(Instant::now());
         }
         self.model_chars += source_chars;
     }
 
-    fn start_provider_batch(&mut self, total: usize) {
+    fn start_provider_batch(&mut self) {
         if self.model_started.is_none() {
             self.model_started = Some(Instant::now());
         }
-        if !self.eta_body_aligned && total >= ETA_BODY_BATCH_MIN_BLOCKS {
-            self.total_model_chars = self.total_model_chars.saturating_sub(self.model_chars);
-            self.model_started = Some(Instant::now());
-            self.model_chars = 0;
-            self.eta_body_aligned = true;
-        }
-    }
-
-    fn seconds_per_model_char(&self, model_elapsed: Duration) -> Option<f64> {
-        seconds_per_unit(model_elapsed, self.model_chars)
     }
 }
 
@@ -211,16 +195,23 @@ mod tests {
     }
 
     #[test]
-    fn eta_resets_when_first_substantial_provider_batch_starts() {
-        let mut progress = ProgressReporter::new(100, 0, 1_000).unwrap();
-        progress.set_provider_batch(0, 3, 1);
-        progress.complete_provider_block(1, 3, 1, 100);
-        assert_eq!(progress.model_chars, 100);
+    fn eta_uses_uncached_chars_from_current_run() {
+        let mut progress = ProgressReporter::new(7_810, 4_998, 100_000).unwrap();
+        progress.set_provider_batch(0, 2_812, 1);
+        progress.model_started = Some(Instant::now() - Duration::from_secs(14 * 60 * 60));
+        progress.model_chars = 90_000;
 
-        progress.set_provider_batch(0, ETA_BODY_BATCH_MIN_BLOCKS, 1);
+        let remaining_chars = progress
+            .total_model_chars
+            .saturating_sub(progress.model_chars);
+        let eta_by_char = seconds_per_unit(
+            progress.model_started.unwrap().elapsed(),
+            progress.model_chars,
+        )
+        .unwrap()
+            * remaining_chars as f64;
 
-        assert_eq!(progress.model_chars, 0);
-        assert_eq!(progress.total_model_chars, 900);
-        assert!(progress.eta_body_aligned);
+        assert_eq!(remaining_chars, 10_000);
+        assert!(eta_by_char > 5_000.0);
     }
 }

@@ -309,7 +309,7 @@ cargo run -- unlock    <INPUT.epub> [--force]
 cargo run -- batch     <SUBCOMMAND>
 ```
 
-`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA is a simple cumulative estimate based on provider translation time per completed uncached source character, so it becomes more useful as a long run progresses. When translation moves from small startup/front-matter batches into the first substantial provider batch, the ETA baseline is reset once so long body runs are not dominated by startup pages. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
+`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA is measured from the current run or resume point: epubicus counts the uncached source characters at startup, measures provider time for completed uncached characters, and projects the remaining uncached characters from that cumulative rate. Cached work from previous runs is shown in the progress position but is not included in the ETA denominator. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
 
 `test` prints translated text for a selected spine range to stdout. It does not create an EPUB.
 
