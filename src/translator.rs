@@ -1,5 +1,7 @@
 use std::{
     collections::VecDeque,
+    error::Error as StdError,
+    fmt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -30,6 +32,47 @@ use crate::{
 
 pub(crate) const ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD: usize = 20;
 pub(crate) const PROMPT_VERSION: &str = "v2";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValidationFailureReason {
+    Empty,
+    PromptLeak,
+    MissingPlaceholder,
+    UnchangedSource,
+    RefusalOrExplanation,
+    UntranslatedText,
+    UntranslatedSegment,
+    Truncated,
+}
+
+impl ValidationFailureReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::PromptLeak => "prompt_leak",
+            Self::MissingPlaceholder => "missing_placeholder",
+            Self::UnchangedSource => "unchanged_source",
+            Self::RefusalOrExplanation => "refusal_or_explanation",
+            Self::UntranslatedText => "untranslated_text",
+            Self::UntranslatedSegment => "untranslated_segment",
+            Self::Truncated => "truncated",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TranslationValidationError {
+    reason: ValidationFailureReason,
+    message: &'static str,
+}
+
+impl fmt::Display for TranslationValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "translation validation failed: {}", self.message)
+    }
+}
+
+impl StdError for TranslationValidationError {}
 
 #[derive(Clone)]
 pub(crate) struct TranslationBackend {
@@ -142,7 +185,7 @@ pub(crate) struct Translator {
 
 pub(crate) enum Translation {
     Translated { text: String, from_cache: bool },
-    Original,
+    Original { provider_attempted: bool },
 }
 
 #[derive(Clone)]
@@ -157,6 +200,7 @@ struct TranslationJobResult {
     index: usize,
     key: String,
     translated: String,
+    source_chars: usize,
     provider: Provider,
     model: String,
     fallback_used: bool,
@@ -333,7 +377,9 @@ impl Translator {
                         from_cache: false,
                     });
                 } else {
-                    translations[result.index] = Some(Translation::Original);
+                    translations[result.index] = Some(Translation::Original {
+                        provider_attempted: true,
+                    });
                 }
                 Ok(())
             },
@@ -388,7 +434,9 @@ impl Translator {
             }
         }
         if self.partial_from_cache {
-            return Ok(Some(Translation::Original));
+            return Ok(Some(Translation::Original {
+                provider_attempted: false,
+            }));
         }
         jobs.push(TranslationJob {
             index,
@@ -522,10 +570,12 @@ fn run_translation_job_with_fallback(
                     backend.provider
                 );
             }
+            let source_chars = job.source.chars().count();
             Ok(TranslationJobResult {
                 index: job.index,
                 key: job.key,
                 translated: job.source,
+                source_chars,
                 provider: backend.provider,
                 model: backend.model.clone(),
                 fallback_used: false,
@@ -537,6 +587,9 @@ fn run_translation_job_with_fallback(
 }
 
 pub(crate) fn is_refusal_validation_error(err: &anyhow::Error) -> bool {
+    if validation_failure_reason(err) == Some(ValidationFailureReason::RefusalOrExplanation) {
+        return true;
+    }
     err.chain().any(|cause| {
         cause
             .to_string()
@@ -545,8 +598,17 @@ pub(crate) fn is_refusal_validation_error(err: &anyhow::Error) -> bool {
 }
 
 fn is_translation_validation_error(err: &anyhow::Error) -> bool {
+    if validation_failure_reason(err).is_some() {
+        return true;
+    }
     err.chain()
         .any(|cause| cause.to_string().contains("translation validation failed"))
+}
+
+pub(crate) fn validation_failure_reason(err: &anyhow::Error) -> Option<ValidationFailureReason> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<TranslationValidationError>())
+        .map(|err| err.reason)
 }
 
 fn run_translation_jobs<F>(
@@ -578,6 +640,7 @@ where
                 passthrough_on_validation_failure,
                 job,
             )?;
+            let source_chars = result.source_chars;
             on_result(result)?;
             completed += 1;
             if let Some(progress) = progress.as_mut() {
@@ -585,6 +648,7 @@ where
                     completed,
                     job_count,
                     backend.current_concurrency(),
+                    source_chars,
                 );
             }
         }
@@ -635,13 +699,16 @@ where
                 .recv()
                 .context("translation worker exited before sending all results")?;
             in_flight = in_flight.saturating_sub(1);
-            on_result(received?)?;
+            let result = received?;
+            let source_chars = result.source_chars;
+            on_result(result)?;
             completed += 1;
             if let Some(progress) = progress.as_mut() {
                 progress.complete_provider_block(
                     completed,
                     job_count,
                     backend.current_concurrency(),
+                    source_chars,
                 );
             }
             dispatch_translation_jobs(
@@ -690,6 +757,7 @@ impl TranslationBackend {
             index: job.index,
             key: job.key,
             translated,
+            source_chars: job.source.chars().count(),
             provider: self.provider,
             model: self.model.clone(),
             fallback_used: false,
@@ -769,8 +837,15 @@ impl TranslationBackend {
                             self.retries
                         );
                     }
-                    prompt =
-                        retry_user_prompt(source, glossary_subset, &translated, &err.to_string());
+                    let reason =
+                        validation_failure_reason(&err).map(ValidationFailureReason::as_str);
+                    prompt = retry_user_prompt(
+                        source,
+                        glossary_subset,
+                        &translated,
+                        &err.to_string(),
+                        reason,
+                    );
                     thread::sleep(Duration::from_secs(wait_secs));
                 }
                 Err(err) => {
@@ -1007,37 +1082,56 @@ pub(crate) fn validate_translation_response(source: &str, translated: &str) -> R
     let source = source.trim();
     let translated = translated.trim();
     if translated.is_empty() {
-        bail!("translation validation failed: provider returned an empty translation");
+        return Err(validation_error(
+            ValidationFailureReason::Empty,
+            "provider returned an empty translation",
+        ));
     }
     if contains_prompt_tag(translated) {
-        bail!("translation validation failed: provider returned prompt wrapper tags");
+        return Err(validation_error(
+            ValidationFailureReason::PromptLeak,
+            "provider returned prompt wrapper tags",
+        ));
     }
     validate_placeholder_tokens(source, translated)?;
     if is_meaningful_english(source)
         && normalize_for_comparison(source) == normalize_for_comparison(translated)
         && !looks_like_reference_number_list(source)
     {
-        bail!("translation validation failed: provider returned the source text unchanged");
+        return Err(validation_error(
+            ValidationFailureReason::UnchangedSource,
+            "provider returned the source text unchanged",
+        ));
     }
     if looks_like_refusal_or_explanation(translated) {
-        bail!(
-            "translation validation failed: provider returned an explanation or refusal instead of a translation"
-        );
+        return Err(validation_error(
+            ValidationFailureReason::RefusalOrExplanation,
+            "provider returned an explanation or refusal instead of a translation",
+        ));
     }
     if likely_untranslated_english(source, translated) {
-        bail!(
-            "translation validation failed: provider response does not appear to contain Japanese text"
-        );
+        return Err(validation_error(
+            ValidationFailureReason::UntranslatedText,
+            "provider response does not appear to contain Japanese text",
+        ));
     }
     if likely_contains_untranslated_english_segment(source, translated) {
-        bail!(
-            "translation validation failed: provider response still contains a long untranslated English segment"
-        );
+        return Err(validation_error(
+            ValidationFailureReason::UntranslatedSegment,
+            "provider response still contains a long untranslated English segment",
+        ));
     }
     if likely_truncated_translation(source, translated) {
-        bail!("translation validation failed: provider response appears to be truncated");
+        return Err(validation_error(
+            ValidationFailureReason::Truncated,
+            "provider response appears to be truncated",
+        ));
     }
     Ok(())
+}
+
+fn validation_error(reason: ValidationFailureReason, message: &'static str) -> anyhow::Error {
+    TranslationValidationError { reason, message }.into()
 }
 
 fn validate_cached_translation(source: &str, translated: &str) -> Result<()> {
@@ -1059,7 +1153,10 @@ fn validate_placeholder_tokens(source: &str, translated: &str) -> Result<()> {
     }
     let translated_tokens = placeholder_signature(translated);
     if source_tokens != translated_tokens {
-        bail!("translation validation failed: provider changed or dropped inline placeholders");
+        return Err(validation_error(
+            ValidationFailureReason::MissingPlaceholder,
+            "provider changed or dropped inline placeholders",
+        ));
     }
     Ok(())
 }

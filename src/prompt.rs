@@ -24,13 +24,18 @@ pub(crate) fn retry_user_prompt(
     glossary_subset: &[GlossaryEntry],
     invalid_translation: &str,
     validation_error: &str,
+    validation_reason: Option<&str>,
 ) -> String {
     let mut prompt = user_prompt(source, glossary_subset);
     prompt.push_str("\n\n<retry_instruction>\n");
-    prompt.push_str("前回の応答は翻訳として検証に失敗しました。以下の問題を修正し、翻訳のみを出力してください。\n");
-    prompt.push_str("問題: ");
+    prompt.push_str("Your previous response failed validation as a translation.\n");
+    prompt.push_str("Fix the issue below and output only the Japanese translation.\n");
+    prompt.push_str("Issue: ");
     prompt.push_str(validation_error);
-    prompt.push_str("\n前回の応答:\n");
+    if let Some(reason) = validation_reason {
+        append_reason_specific_retry_instruction(&mut prompt, source, reason);
+    }
+    prompt.push_str("\nPrevious response:\n");
     prompt.push_str(invalid_translation.trim());
     prompt.push_str("\n</retry_instruction>");
     prompt
@@ -70,5 +75,53 @@ fn style_prompt(style: &str) -> &'static str {
         _ => {
             "【文体】\n- 地の文: である調。原文の論旨と語り口を尊重しつつ、日本語として自然にしてください。\n- 章タイトル: 体言止めを基本にしてください。"
         }
+    }
+}
+
+fn inline_markers(source: &str) -> Vec<String> {
+    let mut markers = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find('⟦') {
+        let after_start = &rest[start..];
+        let Some(end) = after_start.find('⟧') else {
+            break;
+        };
+        let marker_end = end + '⟧'.len_utf8();
+        let marker = &after_start[..marker_end];
+        markers.push(marker.to_string());
+        rest = &after_start[marker_end..];
+    }
+    markers
+}
+
+fn append_reason_specific_retry_instruction(prompt: &mut String, source: &str, reason: &str) {
+    match reason {
+        "missing_placeholder" => {
+            let markers = inline_markers(source);
+            if !markers.is_empty() {
+                prompt.push_str("\nRequired markers:\n");
+                for marker in markers {
+                    prompt.push_str("- ");
+                    prompt.push_str(&marker);
+                    prompt.push('\n');
+                }
+            }
+            prompt.push_str("Include every marker above exactly as written. You may reorder markers only when needed for natural Japanese.\n");
+        }
+        "unchanged_source" | "untranslated_text" | "untranslated_segment" => {
+            prompt.push_str("\nProper nouns, URLs, numbers, symbols, file paths, and code-like identifiers may remain unchanged when appropriate. Translate the surrounding prose/body text into Japanese.\n");
+        }
+        "truncated" => {
+            prompt.push_str("\nDo not omit, summarize, or stop early. Translate through the end of the source text.\n");
+        }
+        "prompt_leak" | "refusal_or_explanation" => {
+            prompt.push_str(
+                "\nDo not output explanations, prefaces, notes, tags, or refusal/judgment text. Return only the translated text.\n",
+            );
+        }
+        "empty" => {
+            prompt.push_str("\nReturn the translated text. Do not return an empty response.\n");
+        }
+        _ => {}
     }
 }

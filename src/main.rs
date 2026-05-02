@@ -63,7 +63,8 @@ use recovery::{UntranslatedReport, recover_command, scan_recovery_command};
 #[cfg(test)]
 use translator::{
     ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD, AdaptiveConcurrency, PROMPT_VERSION, Translation,
-    cache_key, is_refusal_validation_error, placeholder_signature, validate_translation_response,
+    ValidationFailureReason, cache_key, is_refusal_validation_error, placeholder_signature,
+    validate_translation_response, validation_failure_reason,
 };
 use translator::{Translator, split_translation_chunks};
 #[cfg(test)]
@@ -380,8 +381,12 @@ fn translate_book(
     let mut stats = Stats::default();
     let mut progress = if show_progress {
         let total_blocks = count_selected_blocks(book, &selected)?;
-        let cached_blocks = count_selected_cached_blocks(book, &selected, translator)?;
-        Some(ProgressReporter::new(total_blocks, cached_blocks)?)
+        let progress_work = count_selected_progress_work(book, &selected, translator)?;
+        Some(ProgressReporter::new(
+            total_blocks,
+            progress_work.cached_blocks,
+            progress_work.uncached_source_chars,
+        )?)
     } else {
         None
     };
@@ -555,26 +560,39 @@ fn count_selected_blocks(book: &EpubBook, selected: &HashSet<usize>) -> Result<u
     Ok(total)
 }
 
-fn count_selected_cached_blocks(
+struct ProgressWork {
+    cached_blocks: u64,
+    uncached_source_chars: usize,
+}
+
+fn count_selected_progress_work(
     book: &EpubBook,
     selected: &HashSet<usize>,
     translator: &Translator,
-) -> Result<u64> {
-    let mut total = 0u64;
+) -> Result<ProgressWork> {
+    let mut work = ProgressWork {
+        cached_blocks: 0,
+        uncached_source_chars: 0,
+    };
     for (idx, item) in book.spine.iter().enumerate() {
         if selected.contains(&(idx + 1)) {
-            total += count_cached_xhtml_blocks(&item.abs_path, translator)? as u64;
+            let page_work = count_xhtml_progress_work(&item.abs_path, translator)?;
+            work.cached_blocks += page_work.cached_blocks;
+            work.uncached_source_chars += page_work.uncached_source_chars;
         }
     }
-    Ok(total)
+    Ok(work)
 }
 
-fn count_cached_xhtml_blocks(path: &Path, translator: &Translator) -> Result<usize> {
+fn count_xhtml_progress_work(path: &Path, translator: &Translator) -> Result<ProgressWork> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
-    let mut count = 0usize;
+    let mut work = ProgressWork {
+        cached_blocks: 0,
+        uncached_source_chars: 0,
+    };
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -582,9 +600,12 @@ fn count_cached_xhtml_blocks(path: &Path, translator: &Translator) -> Result<usi
                 let end_name = e.name().as_ref().to_vec();
                 let inner = collect_element_inner(&mut reader, &end_name)?;
                 let (source_text, _) = encode_inline(&inner)?;
-                if !source_text.trim().is_empty() && translator.has_cached_translation(&source_text)
-                {
-                    count += 1;
+                if !source_text.trim().is_empty() {
+                    if translator.has_cached_translation(&source_text) {
+                        work.cached_blocks += 1;
+                    } else {
+                        work.uncached_source_chars += source_text.chars().count();
+                    }
                 }
             }
             Event::Eof => break,
@@ -592,7 +613,7 @@ fn count_cached_xhtml_blocks(path: &Path, translator: &Translator) -> Result<usi
         }
         buf.clear();
     }
-    Ok(count)
+    Ok(work)
 }
 
 pub(crate) fn collapse_ws(s: &str) -> String {
@@ -832,13 +853,29 @@ mod tests {
             &entries,
             "Horizon failed.",
             "translation validation failed: provider returned the source text unchanged",
+            Some("unchanged_source"),
         );
         assert!(prompt.contains("Horizon => ホライゾン"));
         assert!(!prompt.contains("(system)"));
         assert!(prompt.contains("<source>\nHorizon failed.\n</source>"));
         assert!(prompt.contains("<retry_instruction>"));
         assert!(prompt.contains("source text unchanged"));
-        assert!(prompt.contains("前回の応答:\nHorizon failed."));
+        assert!(prompt.contains("Previous response:\nHorizon failed."));
+    }
+
+    #[test]
+    fn retry_prompt_lists_required_inline_markers() {
+        let prompt = retry_user_prompt(
+            "Read ⟦E1⟧CALCULATE⟦/E1⟧.",
+            &[],
+            "Read CALCULATE.",
+            "translation validation failed: provider changed or dropped inline placeholders",
+            Some("missing_placeholder"),
+        );
+        assert!(prompt.contains("Required markers:"));
+        assert!(prompt.contains("- ⟦E1⟧"));
+        assert!(prompt.contains("- ⟦/E1⟧"));
+        assert!(prompt.contains("Include every marker above exactly as written"));
     }
 
     #[test]
@@ -998,6 +1035,10 @@ mod tests {
         let err = validate_translation_response("Read ⟦E1⟧this link⟦/E1⟧.", "このリンクを読む。")
             .unwrap_err();
         assert!(err.to_string().contains("placeholders"));
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::MissingPlaceholder)
+        );
     }
 
     #[test]
@@ -1016,6 +1057,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("Japanese"));
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::UntranslatedText)
+        );
     }
 
     #[test]
@@ -1041,6 +1086,10 @@ mod tests {
 
         let err = validate_translation_response(source, translated).unwrap_err();
         assert!(err.to_string().contains("untranslated English segment"));
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::UntranslatedSegment)
+        );
     }
 
     #[test]
@@ -1240,7 +1289,7 @@ mod tests {
             .translate_many(&["Hello".to_string()], None)?
             .remove(0)
         {
-            Translation::Original => {}
+            Translation::Original { .. } => {}
             Translation::Translated { text, .. } => bail!("unexpected translation: {text}"),
         }
         assert_eq!(translator.cache.stats.misses, 1);

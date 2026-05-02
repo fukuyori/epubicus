@@ -165,8 +165,8 @@ pub(crate) fn translate_xhtml_file(
                         ))))?;
                     }
                 }
-                Translation::Original => {
-                    if let Some(progress) = progress.as_mut() {
+                Translation::Original { provider_attempted } => {
+                    if !*provider_attempted && let Some(progress) = progress.as_mut() {
                         progress.inc_passthrough_block();
                     }
                     if mode == Mode::Stdout {
@@ -176,7 +176,9 @@ pub(crate) fn translate_xhtml_file(
                         if let Some(report) = untranslated_report.as_deref_mut() {
                             let source = &sources[translation_index];
                             let cache_key = translator.source_cache_key(source);
-                            let reason = if translator.cache.peek(&cache_key).is_none() {
+                            let reason = if *provider_attempted {
+                                "validation_passthrough"
+                            } else if translator.cache.peek(&cache_key).is_none() {
                                 "cache_miss"
                             } else {
                                 "original_output"

@@ -4,6 +4,12 @@
 
 翻訳 provider は Ollama、OpenAI API、Claude API に対応しています。
 
+## ドキュメント
+
+- [docs/README.md](docs/README.md): 運用ガイド、復旧手順、設計メモの索引。
+- [docs/operation-guide.ja.md](docs/operation-guide.ja.md): 日本語の運用ガイド。
+- [docs/batch-recovery.ja.md](docs/batch-recovery.ja.md): OpenAI Batch API 実行後の復旧手順。
+
 ## クイックスタート
 
 まず EPUB の構造を確認します。翻訳コマンドの `FROM` / `TO` は EPUB リーダー上のページ番号ではなく、1 始まりの OPF spine 番号です。
@@ -179,7 +185,7 @@ cargo run -- batch     <SUBCOMMAND>
 cargo run -- cache     <SUBCOMMAND>
 ```
 
-`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数、未キャッシュブロックの provider リクエスト進捗をプログレスバーに表示します。ETA は未キャッシュの実翻訳が 5 ブロック以上、かつ 30 秒以上進むまでは `ETA warming up` と表示します。OpenAI / Claude など provider が usage を返す場合は、終了時に API リクエスト数と input / output / total tokens を表示します。
+`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数、未キャッシュブロックの provider リクエスト進捗をプログレスバーに表示します。ETA は provider が実際に翻訳した未キャッシュ原文文字数の累積平均から単純に計算するため、長時間の実行ほど目安として落ち着きます。初期の小さな前付けページからまとまった本文バッチに入った時だけ、ETA の基準を一度だけ取り直します。OpenAI / Claude など provider が usage を返す場合は、終了時に API リクエスト数と input / output / total tokens を表示します。
 
 `test` は指定 spine 範囲の翻訳結果を標準出力に表示します。EPUB は作成しません。
 

@@ -2,6 +2,21 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.3.7 - 2026-05-02
+
+### Added
+
+- Added a documentation index under `docs/` so operator guides, recovery notes, and design documents are easier to find.
+
+### Changed
+
+- ETA now uses a cumulative provider-time average per completed uncached source character, with a one-time baseline reset when the first substantial provider batch starts.
+- Validation failures now carry machine-readable reasons, and retry prompts use those reasons to give targeted, generic English correction instructions.
+
+### Fixed
+
+- Avoided double-counting validation passthrough blocks in progress and labelled them as `validation_passthrough`.
+
 ## 0.3.6 - 2026-05-01
 
 ### Added
@@ -19,7 +34,6 @@ All notable changes to epubicus are documented in this file.
 - Recovery and untranslated artifacts are stored with the cache, so cache cleanup commands can manage them together.
 - Glossary candidate output now focuses on `src` / `dst`, while existing `kind` and `note` fields remain readable but are not sent to providers.
 - Glossary cache keys now use trimmed `src` / `dst` pairs and ignore empty translations.
-- ETA now uses provider translation timing and recent completion rate instead of including cache/preparation time in the estimate.
 - Detailed batch recovery documentation was expanded in English and Japanese.
 
 ### Fixed

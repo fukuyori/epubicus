@@ -1,32 +1,31 @@
-use std::{
-    collections::VecDeque,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{path::Path, time::Duration, time::Instant};
 
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::Stats;
 
-const ETA_MIN_MODEL_BLOCKS: usize = 5;
-const ETA_MIN_ELAPSED_SECS: u64 = 30;
-const ETA_RECENT_WINDOW_SECS: u64 = 5 * 60;
+const ETA_BODY_BATCH_MIN_BLOCKS: usize = 32;
 
 pub(crate) struct ProgressReporter {
     bar: ProgressBar,
     total_blocks: u64,
     cached_blocks: u64,
-    model_blocks: usize,
+    total_model_chars: usize,
+    model_chars: usize,
     started: Instant,
     model_started: Option<Instant>,
-    model_samples: VecDeque<(Instant, usize)>,
+    eta_body_aligned: bool,
     page_message: String,
     work_message: Option<String>,
 }
 
 impl ProgressReporter {
-    pub(crate) fn new(total_blocks: u64, cached_blocks: u64) -> Result<Self> {
+    pub(crate) fn new(
+        total_blocks: u64,
+        cached_blocks: u64,
+        total_model_chars: usize,
+    ) -> Result<Self> {
         let bar = ProgressBar::new(total_blocks);
         bar.set_style(
             ProgressStyle::with_template(
@@ -41,10 +40,11 @@ impl ProgressReporter {
             bar,
             total_blocks,
             cached_blocks,
-            model_blocks: 0,
+            total_model_chars,
+            model_chars: 0,
             started: Instant::now(),
             model_started: None,
-            model_samples: VecDeque::new(),
+            eta_body_aligned: false,
             page_message: if cached_blocks > 0 {
                 format!("resume c{cached_blocks}/{total_blocks}")
             } else {
@@ -81,11 +81,11 @@ impl ProgressReporter {
     ) {
         if total == 0 {
             self.work_message = None;
+        } else if completed >= total {
+            self.work_message = None;
         } else {
-            if completed == 0 && self.model_started.is_none() {
-                let now = Instant::now();
-                self.model_started = Some(now);
-                self.model_samples.push_back((now, self.model_blocks));
+            if completed == 0 {
+                self.start_provider_batch(total);
             }
             self.work_message = Some(format!("req {completed}/{total} x{concurrency}"));
         }
@@ -97,14 +97,15 @@ impl ProgressReporter {
         completed: usize,
         total: usize,
         concurrency: usize,
+        source_chars: usize,
     ) {
-        self.record_model_block();
+        self.record_model_chars(source_chars);
         self.bar.inc(1);
         self.set_provider_batch(completed, total, concurrency);
     }
 
     pub(crate) fn inc_model_block(&mut self) {
-        self.record_model_block();
+        self.record_model_chars(0);
         self.bar.inc(1);
         self.refresh_message();
     }
@@ -131,76 +132,59 @@ impl ProgressReporter {
     }
 
     fn eta_message(&self) -> String {
-        let pos = self.bar.position();
-        let remaining = self.total_blocks.saturating_sub(pos);
-        if remaining == 0 {
+        if self.bar.position() >= self.total_blocks {
             return "ETA done".to_string();
         }
-        if self.model_blocks < ETA_MIN_MODEL_BLOCKS {
-            return format!("ETA warm {}/{ETA_MIN_MODEL_BLOCKS}", self.model_blocks);
+        let remaining = self.total_model_chars.saturating_sub(self.model_chars);
+        if remaining == 0 {
+            return "ETA done".to_string();
         }
         let elapsed = self.started.elapsed();
         let model_elapsed = self
             .model_started
             .map(|started| started.elapsed())
             .unwrap_or(elapsed);
-        if model_elapsed < Duration::from_secs(ETA_MIN_ELAPSED_SECS) {
-            return format!(
-                "ETA warm {}s/{ETA_MIN_ELAPSED_SECS}s",
-                model_elapsed.as_secs()
-            );
-        }
-        let Some(seconds_per_block) = self.seconds_per_model_block(model_elapsed) else {
-            return "ETA warming".to_string();
+        let Some(seconds_per_char) = self.seconds_per_model_char(model_elapsed) else {
+            return "ETA pending".to_string();
         };
-        let eta = Duration::from_secs_f64(seconds_per_block * remaining as f64);
+        let eta = Duration::from_secs_f64(seconds_per_char * remaining as f64);
         format!("ETA {}", format_duration_hms(eta))
     }
 
-    fn record_model_block(&mut self) {
+    fn record_model_chars(&mut self, source_chars: usize) {
         let now = Instant::now();
         if self.model_started.is_none() {
             self.model_started = Some(now);
-            self.model_samples.push_back((now, self.model_blocks));
         }
-        self.model_blocks += 1;
-        self.model_samples.push_back((now, self.model_blocks));
-        let keep_after = now
-            .checked_sub(Duration::from_secs(ETA_RECENT_WINDOW_SECS))
-            .unwrap_or(now);
-        while self
-            .model_samples
-            .front()
-            .is_some_and(|(instant, _)| *instant < keep_after)
-        {
-            self.model_samples.pop_front();
+        self.model_chars += source_chars;
+    }
+
+    fn start_provider_batch(&mut self, total: usize) {
+        if self.model_started.is_none() {
+            self.model_started = Some(Instant::now());
+        }
+        if !self.eta_body_aligned && total >= ETA_BODY_BATCH_MIN_BLOCKS {
+            self.total_model_chars = self.total_model_chars.saturating_sub(self.model_chars);
+            self.model_started = Some(Instant::now());
+            self.model_chars = 0;
+            self.eta_body_aligned = true;
         }
     }
 
-    fn seconds_per_model_block(&self, model_elapsed: Duration) -> Option<f64> {
-        let recent_rate = self
-            .model_samples
-            .front()
-            .zip(self.model_samples.back())
-            .and_then(|((first_at, first_blocks), (last_at, last_blocks))| {
-                let blocks = last_blocks.saturating_sub(*first_blocks);
-                let elapsed = last_at.duration_since(*first_at);
-                seconds_per_block(elapsed, blocks)
-            });
-
-        recent_rate.or_else(|| seconds_per_block(model_elapsed, self.model_blocks))
+    fn seconds_per_model_char(&self, model_elapsed: Duration) -> Option<f64> {
+        seconds_per_unit(model_elapsed, self.model_chars)
     }
 }
 
-fn seconds_per_block(elapsed: Duration, blocks: usize) -> Option<f64> {
-    if blocks == 0 {
+fn seconds_per_unit(elapsed: Duration, units: usize) -> Option<f64> {
+    if units == 0 {
         return None;
     }
     let elapsed_secs = elapsed.as_secs_f64();
     if elapsed_secs <= 0.0 {
         return None;
     }
-    Some(elapsed_secs / blocks as f64)
+    Some(elapsed_secs / units as f64)
 }
 
 fn format_duration_hms(duration: Duration) -> String {
@@ -216,13 +200,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seconds_per_block_ignores_empty_or_zero_elapsed_samples() {
-        assert!(seconds_per_block(Duration::from_secs(10), 0).is_none());
-        assert!(seconds_per_block(Duration::ZERO, 10).is_none());
+    fn seconds_per_unit_ignores_empty_or_zero_elapsed_samples() {
+        assert!(seconds_per_unit(Duration::from_secs(10), 0).is_none());
+        assert!(seconds_per_unit(Duration::ZERO, 10).is_none());
     }
 
     #[test]
-    fn seconds_per_block_uses_elapsed_time_per_completed_block() {
-        assert_eq!(seconds_per_block(Duration::from_secs(15), 5), Some(3.0));
+    fn seconds_per_unit_uses_elapsed_time_per_completed_unit() {
+        assert_eq!(seconds_per_unit(Duration::from_secs(15), 5), Some(3.0));
+    }
+
+    #[test]
+    fn eta_resets_when_first_substantial_provider_batch_starts() {
+        let mut progress = ProgressReporter::new(100, 0, 1_000).unwrap();
+        progress.set_provider_batch(0, 3, 1);
+        progress.complete_provider_block(1, 3, 1, 100);
+        assert_eq!(progress.model_chars, 100);
+
+        progress.set_provider_batch(0, ETA_BODY_BATCH_MIN_BLOCKS, 1);
+
+        assert_eq!(progress.model_chars, 0);
+        assert_eq!(progress.total_model_chars, 900);
+        assert!(progress.eta_body_aligned);
     }
 }

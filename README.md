@@ -4,6 +4,12 @@
 
 It currently supports local Ollama, OpenAI, and Claude providers.
 
+## Documentation
+
+- [docs/README.md](docs/README.md) maps the operator guides, recovery notes, and design documents.
+- [docs/batch-recovery.md](docs/batch-recovery.md) is the detailed checklist for Batch API recovery.
+- [docs/operation-guide.ja.md](docs/operation-guide.ja.md) is the Japanese operator guide.
+
 ## Quick Start
 
 Inspect the EPUB first. `FROM` and `TO` in translation commands are 1-based OPF spine numbers, not reader page numbers.
@@ -303,7 +309,7 @@ cargo run -- unlock    <INPUT.epub> [--force]
 cargo run -- batch     <SUBCOMMAND>
 ```
 
-`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA stays as `ETA warming up` until at least 5 uncached model-translated blocks and 30 seconds have been observed. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
+`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA is a simple cumulative estimate based on provider translation time per completed uncached source character, so it becomes more useful as a long run progresses. When translation moves from small startup/front-matter batches into the first substantial provider batch, the ETA baseline is reset once so long body runs are not dominated by startup pages. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
 
 `test` prints translated text for a selected spine range to stdout. It does not create an EPUB.
 
