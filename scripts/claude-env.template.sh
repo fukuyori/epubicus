@@ -67,7 +67,7 @@ invoke_epubicus_claude() {
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
     if [ "$TO" -gt 0 ]; then set -- "$@" --to "$TO"; fi
     if [ "$USAGE_ONLY" = "1" ]; then set -- "$@" --usage-only; fi
-    cargo run -- "$@"
+    cargo run --release -- "$@"
 }
 
 echo
@@ -86,3 +86,4 @@ echo
 if [ "$NO_RUN" = "0" ]; then
     invoke_epubicus_claude "$@"
 fi
+

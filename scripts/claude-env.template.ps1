@@ -104,12 +104,12 @@ function Show-EpubicusClaudeCommands {
     Write-Host ""
     Write-Host "Normal Claude conversion:"
     Write-Host "Invoke-EpubicusClaude"
-    Write-Host "cargo run -- $((New-EpubicusClaudeArgs) -join ' ')"
+    Write-Host "cargo run --release -- $((New-EpubicusClaudeArgs) -join ' ')"
     Write-Host ""
 }
 
 function Invoke-EpubicusClaude {
-    cargo run -- @(New-EpubicusClaudeArgs)
+    cargo run --release -- @(New-EpubicusClaudeArgs)
 }
 
 Show-EpubicusClaudeCommands
@@ -117,3 +117,4 @@ Show-EpubicusClaudeCommands
 if (-not $NoRun) {
     Invoke-EpubicusClaude
 }
+

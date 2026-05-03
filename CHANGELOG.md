@@ -2,11 +2,21 @@
 
 All notable changes to epubicus are documented in this file.
 
-## 0.3.8 - 2026-05-03
+## 0.3.9 - 2026-05-03
+
+### Added
+
+- Added runtime/progress notes in English and Japanese, covering release-build helper scripts, ETA measurement, and inline marker validation.
 
 ### Changed
 
 - Simplified ETA calculation so resumed runs measure only the uncached source characters counted at startup, using the current run's provider elapsed time and completed uncached characters.
+- Excluded spine pages 1-3 from ETA timing and character totals, and kept ETA hidden as `ETA pending` until page 4 or later has at least five minutes of provider work measured.
+- Switched helper script templates to `cargo run --release -- ...` so normal scripted conversions use release builds.
+
+### Fixed
+
+- Rejected provider output that adds bracket-style inline markers such as `⟦/S1⟧` or `⟦DAX⟧`, preventing unresolved tag-restoration markers from reaching the EPUB output.
 
 ## 0.3.7 - 2026-05-02
 

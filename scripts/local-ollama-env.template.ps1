@@ -110,15 +110,15 @@ function Show-EpubicusLocalCommands {
     Write-Host ""
     Write-Host "Local page-range check:"
     Write-Host "Invoke-EpubicusLocalPageCheck"
-    Write-Host "cargo run -- $((New-EpubicusLocalTranslateArgs -From $From -To $To) -join ' ')"
+    Write-Host "cargo run --release -- $((New-EpubicusLocalTranslateArgs -From $From -To $To) -join ' ')"
     Write-Host ""
     Write-Host "Local full conversion:"
     Write-Host "Invoke-EpubicusLocalFull"
-    Write-Host "cargo run -- $((New-EpubicusLocalTranslateArgs) -join ' ')"
+    Write-Host "cargo run --release -- $((New-EpubicusLocalTranslateArgs) -join ' ')"
     Write-Host ""
     Write-Host "Assemble from cache only:"
     Write-Host "Invoke-EpubicusAssembleFromCache"
-    Write-Host "cargo run -- $((New-EpubicusLocalTranslateArgs -PartialFromCache) -join ' ')"
+    Write-Host "cargo run --release -- $((New-EpubicusLocalTranslateArgs -PartialFromCache) -join ' ')"
     Write-Host ""
 }
 
@@ -128,15 +128,15 @@ function Invoke-EpubicusLocalPageCheck {
         [int]$To = 3
     )
 
-    cargo run -- @(New-EpubicusLocalTranslateArgs -From $From -To $To)
+    cargo run --release -- @(New-EpubicusLocalTranslateArgs -From $From -To $To)
 }
 
 function Invoke-EpubicusLocalFull {
-    cargo run -- @(New-EpubicusLocalTranslateArgs)
+    cargo run --release -- @(New-EpubicusLocalTranslateArgs)
 }
 
 function Invoke-EpubicusAssembleFromCache {
-    cargo run -- @(New-EpubicusLocalTranslateArgs -PartialFromCache)
+    cargo run --release -- @(New-EpubicusLocalTranslateArgs -PartialFromCache)
 }
 
 Show-EpubicusLocalCommands
@@ -154,3 +154,4 @@ if (-not $NoRun) {
         }
     }
 }
+

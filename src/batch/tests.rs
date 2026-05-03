@@ -130,7 +130,7 @@ fn batch_prepare_splits_request_parts_by_byte_count() -> Result<()> {
         from: Some(1),
         to: Some(1),
         max_requests_per_file: DEFAULT_BATCH_MAX_REQUESTS_PER_FILE,
-        max_bytes_per_file: 1_500,
+        max_bytes_per_file: 1_600,
         common: common_args(cache_root.clone()),
     })?;
 
@@ -142,8 +142,8 @@ fn batch_prepare_splits_request_parts_by_byte_count() -> Result<()> {
     assert_eq!(parts.len(), 2);
     assert_eq!(parts[0]["request_count"], 1);
     assert_eq!(parts[1]["request_count"], 1);
-    assert!(parts[0]["request_bytes"].as_u64().unwrap() <= 1_500);
-    assert!(parts[1]["request_bytes"].as_u64().unwrap() <= 1_500);
+    assert!(parts[0]["request_bytes"].as_u64().unwrap() <= 1_600);
+    assert!(parts[1]["request_bytes"].as_u64().unwrap() <= 1_600);
     Ok(())
 }
 

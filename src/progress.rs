@@ -5,6 +5,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::Stats;
 
+const MIN_ETA_ELAPSED: Duration = Duration::from_secs(5 * 60);
+const ETA_MEASURE_FROM_PAGE: usize = 4;
+
 pub(crate) struct ProgressReporter {
     bar: ProgressBar,
     total_blocks: u64,
@@ -13,6 +16,7 @@ pub(crate) struct ProgressReporter {
     model_chars: usize,
     started: Instant,
     model_started: Option<Instant>,
+    eta_measure_page: bool,
     page_message: String,
     work_message: Option<String>,
 }
@@ -41,6 +45,7 @@ impl ProgressReporter {
             model_chars: 0,
             started: Instant::now(),
             model_started: None,
+            eta_measure_page: false,
             page_message: if cached_blocks > 0 {
                 format!("resume c{cached_blocks}/{total_blocks}")
             } else {
@@ -53,6 +58,7 @@ impl ProgressReporter {
     }
 
     pub(crate) fn set_page(&mut self, page_no: usize, total_pages: usize, href: &str) {
+        self.eta_measure_page = should_measure_eta_page(page_no);
         let name = Path::new(href)
             .file_name()
             .and_then(|name| name.to_str())
@@ -131,6 +137,9 @@ impl ProgressReporter {
         if self.bar.position() >= self.total_blocks {
             return "ETA done".to_string();
         }
+        if self.total_model_chars == 0 {
+            return "ETA pending".to_string();
+        }
         let remaining = self.total_model_chars.saturating_sub(self.model_chars);
         if remaining == 0 {
             return "ETA done".to_string();
@@ -142,11 +151,20 @@ impl ProgressReporter {
         let Some(seconds_per_char) = seconds_per_unit(model_elapsed, self.model_chars) else {
             return "ETA pending".to_string();
         };
+        if !eta_sample_ready(model_elapsed) {
+            return "ETA pending".to_string();
+        }
         let eta = Duration::from_secs_f64(seconds_per_char * remaining as f64);
         format!("ETA {}", format_duration_hms(eta))
     }
 
     fn record_model_chars(&mut self, source_chars: usize) {
+        if !self.eta_measure_page {
+            return;
+        }
+        if source_chars == 0 {
+            return;
+        }
         if self.model_started.is_none() {
             self.model_started = Some(Instant::now());
         }
@@ -154,10 +172,21 @@ impl ProgressReporter {
     }
 
     fn start_provider_batch(&mut self) {
+        if !self.eta_measure_page {
+            return;
+        }
         if self.model_started.is_none() {
             self.model_started = Some(Instant::now());
         }
     }
+}
+
+fn eta_sample_ready(elapsed: Duration) -> bool {
+    elapsed >= MIN_ETA_ELAPSED
+}
+
+pub(crate) fn should_measure_eta_page(page_no: usize) -> bool {
+    page_no >= ETA_MEASURE_FROM_PAGE
 }
 
 fn seconds_per_unit(elapsed: Duration, units: usize) -> Option<f64> {
@@ -195,8 +224,50 @@ mod tests {
     }
 
     #[test]
+    fn eta_sample_waits_for_five_minutes() {
+        assert!(!eta_sample_ready(Duration::from_secs(5 * 60 - 1)));
+        assert!(eta_sample_ready(Duration::from_secs(5 * 60)));
+    }
+
+    #[test]
+    fn eta_message_stays_pending_until_sample_is_ready() {
+        let mut progress = ProgressReporter::new(100, 0, 100_000).unwrap();
+        progress.set_page(4, 100, "chapter.xhtml");
+        progress.model_started = Some(Instant::now() - Duration::from_secs(5 * 60 - 1));
+        progress.model_chars = 10_000;
+        assert_eq!(progress.eta_message(), "ETA pending");
+
+        progress.model_started = Some(Instant::now() - Duration::from_secs(5 * 60));
+        assert!(progress.eta_message().starts_with("ETA "));
+    }
+
+    #[test]
+    fn eta_ignores_first_three_spine_pages() {
+        let mut progress = ProgressReporter::new(100, 0, 10_000).unwrap();
+        progress.set_page(3, 100, "front.xhtml");
+        progress.set_provider_batch(0, 1, 1);
+        progress.complete_provider_block(1, 1, 1, 5_000);
+
+        assert!(progress.model_started.is_none());
+        assert_eq!(progress.model_chars, 0);
+
+        progress.set_page(4, 100, "body.xhtml");
+        progress.set_provider_batch(0, 1, 1);
+        assert!(progress.model_started.is_some());
+        progress.complete_provider_block(1, 1, 1, 5_000);
+        assert_eq!(progress.model_chars, 5_000);
+    }
+
+    #[test]
+    fn eta_stays_pending_when_selected_pages_are_not_measured() {
+        let progress = ProgressReporter::new(10, 0, 0).unwrap();
+        assert_eq!(progress.eta_message(), "ETA pending");
+    }
+
+    #[test]
     fn eta_uses_uncached_chars_from_current_run() {
         let mut progress = ProgressReporter::new(7_810, 4_998, 100_000).unwrap();
+        progress.set_page(4, 28, "body.xhtml");
         progress.set_provider_batch(0, 2_812, 1);
         progress.model_started = Some(Instant::now() - Duration::from_secs(14 * 60 * 60));
         progress.model_chars = 90_000;

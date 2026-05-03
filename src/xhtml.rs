@@ -290,6 +290,9 @@ fn restore_inline(translated: &str, map: &InlineMap) -> Result<Vec<Event<'static
     for token in tokens {
         match token {
             Token::Text(s) if !s.is_empty() => {
+                if contains_inline_marker(&s) {
+                    bail!("unresolved inline placeholder marker remains in translated text");
+                }
                 events.push(Event::Text(BytesText::new(&s).into_owned()))
             }
             Token::Text(_) => {}
@@ -311,6 +314,10 @@ fn restore_inline(translated: &str, map: &InlineMap) -> Result<Vec<Event<'static
         }
     }
     Ok(events)
+}
+
+fn contains_inline_marker(text: &str) -> bool {
+    text.contains('⟦') && text.contains('⟧')
 }
 
 #[cfg(test)]

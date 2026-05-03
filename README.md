@@ -7,6 +7,7 @@ It currently supports local Ollama, OpenAI, and Claude providers.
 ## Documentation
 
 - [docs/README.md](docs/README.md) maps the operator guides, recovery notes, and design documents.
+- [docs/runtime-progress.md](docs/runtime-progress.md) explains release-build script execution, ETA measurement, and inline marker validation.
 - [docs/batch-recovery.md](docs/batch-recovery.md) is the detailed checklist for Batch API recovery.
 - [docs/operation-guide.ja.md](docs/operation-guide.ja.md) is the Japanese operator guide.
 
@@ -69,7 +70,7 @@ Copy-Item .\scripts\local-ollama-env.template.ps1 .\scripts\local-ollama-env.ps1
 .\scripts\local-ollama-env.ps1 .\book.epub
 ```
 
-The script sets `EPUBICUS_*` environment variables for Ollama, uses the input
+The script runs `cargo run --release -- ...`, sets `EPUBICUS_*` environment variables for Ollama, uses the input
 EPUB as `$InputEpub`, and writes the output next to the input with `_jp`
 appended to the file name:
 
@@ -171,7 +172,7 @@ Multilingual input/output support is planned in
 
 Translation results are cached per-input EPUB under an OS-standard cache root (Windows: `%LOCALAPPDATA%\epubicus\cache`, Unix: `~/.cache/epubicus`). Each input gets its own subdirectory named after the SHA-256 hash of its bytes, with `manifest.json` and `translations.jsonl` inside.
 
-Provider responses are validated before they are written to the cache. Empty responses, unchanged English source text, prompt-wrapper leaks, missing inline placeholders, and likely refusal/explanation text are retried according to `--retries`. If a likely refusal/explanation still fails after retries and `--fallback-provider` is set, the original source text is translated again with the fallback provider. If the fallback also fails, the run stops without caching the bad response.
+Provider responses are validated before they are written to the cache. Empty responses, unchanged English source text, prompt-wrapper leaks, missing/changed/added inline placeholders, and likely refusal/explanation text are retried according to `--retries`. Added bracket-style markers such as `⟦/S1⟧` or `⟦DAX⟧` are rejected so tag-restoration markers do not leak into the EPUB output. If a likely refusal/explanation still fails after retries and `--fallback-provider` is set, the original source text is translated again with the fallback provider. If the fallback also fails, the run stops without caching the bad response.
 
 When the same cache key is produced more than once, epubicus keeps the first
 valid cached translation. Identical duplicate writes are treated as already
@@ -309,7 +310,7 @@ cargo run -- unlock    <INPUT.epub> [--force]
 cargo run -- batch     <SUBCOMMAND>
 ```
 
-`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA is measured from the current run or resume point: epubicus counts the uncached source characters at startup, measures provider time for completed uncached characters, and projects the remaining uncached characters from that cumulative rate. Cached work from previous runs is shown in the progress position but is not included in the ETA denominator. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
+`translate` creates an EPUB and shows a progress bar with elapsed time, ETA, selected spine pages, translatable XHTML block count, and in-flight provider request progress for uncached blocks. ETA is measured from the current run or resume point, but spine pages 1-3 are excluded from ETA timing and character totals. epubicus counts uncached source characters from spine page 4 onward at startup, keeps ETA as pending until provider work on page 4 or later has been measured for at least five minutes, then projects the remaining uncached characters from that cumulative rate. Cached work from previous runs is shown in the progress position but is not included in the ETA denominator. When the provider returns usage data, such as OpenAI or Claude, the final summary includes API request count and input / output / total tokens.
 
 `test` prints translated text for a selected spine range to stdout. It does not create an EPUB.
 

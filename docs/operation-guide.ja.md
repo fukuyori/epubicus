@@ -25,6 +25,12 @@ cargo run -- translate .\book.epub --from 3 --to 3 --dry-run
 D:\books\sample.epub -> D:\books\sample_jp.epub
 ```
 
+## 実行プロファイルと進捗表示
+
+テンプレートスクリプトは、通常の長時間変換を `cargo run --release -- ...` で実行します。手動コマンド例の `cargo run -- ...` は短い確認や開発時の説明用です。本番寄りの変換では、スクリプトまたは `--release` を付けた手動コマンドを使ってください。
+
+ETA は前付けページを除外して測ります。spine 1〜3ページ目は計測時間と文字数に入れず、4ページ目以降で provider 翻訳が始まってから5分経つまでは `ETA pending` のままです。詳しくは [実行プロファイルと進捗表示](runtime-progress.ja.md) を参照してください。
+
 ## ローカル Ollama
 
 PowerShell ではテンプレートをコピーして使います。コピーしたファイルは `.gitignore` 対象なので、モデル名や並列数を自分用に変更できます。

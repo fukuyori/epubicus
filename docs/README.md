@@ -5,6 +5,8 @@ This directory keeps operator-facing guides separate from design notes.
 ## Operator Guides
 
 - [operation-guide.ja.md](operation-guide.ja.md) - Japanese operational guide for normal translation, cache use, recovery, and cleanup.
+- [runtime-progress.md](runtime-progress.md) - Runtime notes for release-build scripts, ETA measurement, and inline marker validation.
+- [runtime-progress.ja.md](runtime-progress.ja.md) - Japanese version of the runtime and progress notes.
 - [batch-recovery.md](batch-recovery.md) - English checklist for recovering unfinished or partially failed OpenAI Batch API runs.
 - [batch-recovery.ja.md](batch-recovery.ja.md) - Japanese version of the Batch API recovery checklist.
 

@@ -102,20 +102,20 @@ show_epubicus_local_commands() {
     echo
     echo "Local page-range check:"
     echo "invoke_epubicus_local_page_check"
-    echo "cargo run -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --from $FROM --to $TO --keep-cache --output \"\$OutputEpub\" --passthrough-on-validation-failure"
+    echo "cargo run --release -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --from $FROM --to $TO --keep-cache --output \"\$OutputEpub\" --passthrough-on-validation-failure"
     echo
     echo "Local full conversion:"
     echo "invoke_epubicus_local_full"
-    echo "cargo run -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --keep-cache --output \"\$OutputEpub\" --passthrough-on-validation-failure"
+    echo "cargo run --release -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --keep-cache --output \"\$OutputEpub\" --passthrough-on-validation-failure"
     echo
     echo "Assemble from cache only:"
     echo "invoke_epubicus_assemble_from_cache"
-    echo "cargo run -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --partial-from-cache --keep-cache --output \"\$OutputEpub\""
+    echo "cargo run --release -- translate \"\$InputEpub\" --cache-root \"\$CacheRoot\" --partial-from-cache --keep-cache --output \"\$OutputEpub\""
     echo
 }
 
 invoke_epubicus_local_page_check() {
-    cargo run -- translate "$InputEpub" \
+    cargo run --release -- translate "$InputEpub" \
         --cache-root "$CacheRoot" \
         --from "$FROM" \
         --to "$TO" \
@@ -126,7 +126,7 @@ invoke_epubicus_local_page_check() {
 }
 
 invoke_epubicus_local_full() {
-    cargo run -- translate "$InputEpub" \
+    cargo run --release -- translate "$InputEpub" \
         --cache-root "$CacheRoot" \
         --keep-cache \
         --output "$OutputEpub" \
@@ -135,7 +135,7 @@ invoke_epubicus_local_full() {
 }
 
 invoke_epubicus_assemble_from_cache() {
-    cargo run -- translate "$InputEpub" \
+    cargo run --release -- translate "$InputEpub" \
         --cache-root "$CacheRoot" \
         --partial-from-cache \
         --keep-cache \
@@ -156,3 +156,4 @@ if [ "$NO_RUN" = "0" ]; then
             ;;
     esac
 fi
+

@@ -67,15 +67,15 @@ invoke_epubicus_openai_batch() {
     if [ "$NO_WAIT" = "0" ]; then set -- "$@" --wait; fi
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
     if [ "$TO" -gt 0 ]; then set -- "$@" --to "$TO"; fi
-    cargo run -- batch "$@"
+    cargo run --release -- batch "$@"
 }
 
 invoke_epubicus_openai_batch_status() {
-    cargo run -- batch status "$InputEpub" --cache-root "$CacheRoot"
+    cargo run --release -- batch status "$InputEpub" --cache-root "$CacheRoot"
 }
 
 invoke_epubicus_openai_batch_verify() {
-    cargo run -- batch verify "$InputEpub" --cache-root "$CacheRoot"
+    cargo run --release -- batch verify "$InputEpub" --cache-root "$CacheRoot"
 }
 
 echo
@@ -94,3 +94,4 @@ echo
 if [ "$NO_RUN" = "0" ]; then
     invoke_epubicus_openai_batch "$@"
 fi
+

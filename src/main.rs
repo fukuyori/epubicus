@@ -55,7 +55,7 @@ use epub::{
 use glossary::GlossaryEntry;
 use glossary::glossary_command;
 use input_lock::{acquire_input_run_lock, unlock_command};
-use progress::ProgressReporter;
+use progress::{ProgressReporter, should_measure_eta_page};
 #[cfg(test)]
 use prompt::retry_user_prompt;
 use prompt::{system_prompt, user_prompt};
@@ -576,7 +576,12 @@ fn count_selected_progress_work(
     };
     for (idx, item) in book.spine.iter().enumerate() {
         if selected.contains(&(idx + 1)) {
-            let page_work = count_xhtml_progress_work(&item.abs_path, translator)?;
+            let page_no = idx + 1;
+            let page_work = count_xhtml_progress_work(
+                &item.abs_path,
+                translator,
+                should_measure_eta_page(page_no),
+            )?;
             work.cached_blocks += page_work.cached_blocks;
             work.uncached_source_chars += page_work.uncached_source_chars;
         }
@@ -584,7 +589,11 @@ fn count_selected_progress_work(
     Ok(work)
 }
 
-fn count_xhtml_progress_work(path: &Path, translator: &Translator) -> Result<ProgressWork> {
+fn count_xhtml_progress_work(
+    path: &Path,
+    translator: &Translator,
+    count_eta_chars: bool,
+) -> Result<ProgressWork> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
@@ -603,7 +612,7 @@ fn count_xhtml_progress_work(path: &Path, translator: &Translator) -> Result<Pro
                 if !source_text.trim().is_empty() {
                     if translator.has_cached_translation(&source_text) {
                         work.cached_blocks += 1;
-                    } else {
+                    } else if count_eta_chars {
                         work.uncached_source_chars += source_text.chars().count();
                     }
                 }
@@ -757,6 +766,29 @@ mod tests {
             restored_text,
             "Beston, H. B.、<cite>The Firelight Fairy Book</cite>。"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inline_restore_rejects_unresolved_marker_text() -> Result<()> {
+        let source = br##"<p>Practice <span id="anchor"/>often.</p>"##;
+        let mut reader = Reader::from_reader(Cursor::new(source));
+        reader.config_mut().trim_text(false);
+        let mut buf = Vec::new();
+        let inner = loop {
+            match reader.read_event_into(&mut buf)? {
+                Event::Start(e) if local_name(e.name().as_ref()) == b"p" => {
+                    let end_name = e.name().as_ref().to_vec();
+                    break collect_element_inner(&mut reader, &end_name)?;
+                }
+                Event::Eof => bail!("missing test paragraph"),
+                _ => {}
+            }
+            buf.clear();
+        };
+        let (_, inline_map) = encode_inline(&inner)?;
+        let err = try_restore_inline("練習する⟦S1⟧こと。⟦/S1⟧", &inline_map).unwrap_err();
+        assert!(err.to_string().contains("unresolved inline placeholder"));
         Ok(())
     }
 
@@ -1034,6 +1066,31 @@ mod tests {
     fn translation_validation_rejects_missing_placeholder() {
         let err = validate_translation_response("Read ⟦E1⟧this link⟦/E1⟧.", "このリンクを読む。")
             .unwrap_err();
+        assert!(err.to_string().contains("placeholders"));
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::MissingPlaceholder)
+        );
+    }
+
+    #[test]
+    fn translation_validation_rejects_extra_self_closing_close_marker() {
+        let err = validate_translation_response("Practice ⟦S1⟧often.", "⟦S1⟧頻繁に練習する。⟦/S1⟧")
+            .unwrap_err();
+        assert!(err.to_string().contains("placeholders"));
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::MissingPlaceholder)
+        );
+    }
+
+    #[test]
+    fn translation_validation_rejects_model_added_bracket_marker() {
+        let err = validate_translation_response(
+            "DAX evaluates filters.",
+            "⟦DAX⟧はフィルターを評価する。",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("placeholders"));
         assert_eq!(
             validation_failure_reason(&err),

@@ -1147,6 +1147,15 @@ fn contains_prompt_tag(text: &str) -> bool {
 }
 
 fn validate_placeholder_tokens(source: &str, translated: &str) -> Result<()> {
+    let source_markers = bracket_markers(source);
+    let translated_markers = bracket_markers(translated);
+    if source_markers != translated_markers {
+        return Err(validation_error(
+            ValidationFailureReason::MissingPlaceholder,
+            "provider changed, dropped, or added inline placeholders",
+        ));
+    }
+
     let source_tokens = placeholder_signature(source);
     if source_tokens.is_empty() {
         return Ok(());
@@ -1159,6 +1168,22 @@ fn validate_placeholder_tokens(source: &str, translated: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn bracket_markers(text: &str) -> Vec<String> {
+    let mut markers = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('⟦') {
+        let after_start = &rest[start..];
+        let Some(end) = after_start.find('⟧') else {
+            break;
+        };
+        let marker_end = end + '⟧'.len_utf8();
+        markers.push(after_start[..marker_end].to_string());
+        rest = &after_start[marker_end..];
+    }
+    markers.sort_unstable();
+    markers
 }
 
 pub(crate) fn placeholder_signature(text: &str) -> Vec<String> {

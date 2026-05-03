@@ -8,6 +8,7 @@
 
 - [docs/README.md](docs/README.md): 運用ガイド、復旧手順、設計メモの索引。
 - [docs/operation-guide.ja.md](docs/operation-guide.ja.md): 日本語の運用ガイド。
+- [docs/runtime-progress.ja.md](docs/runtime-progress.ja.md): リリースビルド実行、ETA 計測、インラインマーカー検証の運用メモ。
 - [docs/batch-recovery.ja.md](docs/batch-recovery.ja.md): OpenAI Batch API 実行後の復旧手順。
 
 ## クイックスタート
@@ -66,7 +67,7 @@ cargo run -- translate .\book.epub -o .\book.ja.epub
 
 翻訳結果は OS 標準のキャッシュ root（Windows: `%LOCALAPPDATA%\epubicus\cache`、Unix: `~/.cache/epubicus`）配下に、入力 EPUB ごとに保存されます。サブディレクトリ名は入力 EPUB の SHA-256 ハッシュ先頭 16 バイト hex で、中に `manifest.json` と `translations.jsonl` が入ります。
 
-provider から返った内容はキャッシュに書く前に検証します。空応答、英語原文そのまま、プロンプト用タグの混入、インラインプレースホルダ欠落、拒否・説明文らしい応答は `--retries` に従って再試行します。拒否・説明文らしい応答で再試行が尽きた場合、`--fallback-provider` が指定されていれば同じ原文を fallback provider で翻訳し直します。fallback も失敗した場合は翻訳として保存せずエラーにします。
+provider から返った内容はキャッシュに書く前に検証します。空応答、英語原文そのまま、プロンプト用タグの混入、インラインプレースホルダの欠落・変更・追加、拒否・説明文らしい応答は `--retries` に従って再試行します。`⟦/S1⟧` や `⟦DAX⟧` のように provider が追加した括弧型マーカーも拒否し、タグ復元用の記号が EPUB 出力に漏れないようにします。拒否・説明文らしい応答で再試行が尽きた場合、`--fallback-provider` が指定されていれば同じ原文を fallback provider で翻訳し直します。fallback も失敗した場合は翻訳として保存せずエラーにします。
 
 ```powershell
 cargo run -- translate .\book.epub -o .\book.ja.epub --cache-root .\.epubicus-cache
@@ -185,7 +186,7 @@ cargo run -- batch     <SUBCOMMAND>
 cargo run -- cache     <SUBCOMMAND>
 ```
 
-`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数、未キャッシュブロックの provider リクエスト進捗をプログレスバーに表示します。ETA は現在の実行、または再開した時点から測ります。開始時に未キャッシュ原文文字数を数え、provider が完了した未キャッシュ文字数と経過時間の累積平均から、残りの未キャッシュ文字数を単純に予測します。以前の実行でキャッシュ済みだった分は進捗位置には反映しますが、ETA の分母には入れません。OpenAI / Claude など provider が usage を返す場合は、終了時に API リクエスト数と input / output / total tokens を表示します。
+`translate` は EPUB を作成します。本番翻訳では、経過時間、予想残り時間、選択した spine ページ、翻訳対象 XHTML ブロック数、未キャッシュブロックの provider リクエスト進捗をプログレスバーに表示します。ETA は現在の実行、または再開した時点から測りますが、spine 1〜3ページ目はETAの計測時間と文字数から除外します。開始時に4ページ目以降の未キャッシュ原文文字数を数え、4ページ目以降のprovider作業の計測時間が5分に達するまでは `ETA pending` のままにし、その後は4ページ目以降で完了した未キャッシュ文字数と経過時間の累積平均から、残りの未キャッシュ文字数を単純に予測します。以前の実行でキャッシュ済みだった分は進捗位置には反映しますが、ETA の分母には入れません。OpenAI / Claude など provider が usage を返す場合は、終了時に API リクエスト数と input / output / total tokens を表示します。
 
 `test` は指定 spine 範囲の翻訳結果を標準出力に表示します。EPUB は作成しません。
 

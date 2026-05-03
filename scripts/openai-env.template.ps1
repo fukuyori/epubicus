@@ -104,12 +104,12 @@ function Show-EpubicusOpenAiCommands {
     Write-Host ""
     Write-Host "Normal OpenAI conversion:"
     Write-Host "Invoke-EpubicusOpenAi"
-    Write-Host "cargo run -- $((New-EpubicusOpenAiArgs) -join ' ')"
+    Write-Host "cargo run --release -- $((New-EpubicusOpenAiArgs) -join ' ')"
     Write-Host ""
 }
 
 function Invoke-EpubicusOpenAi {
-    cargo run -- @(New-EpubicusOpenAiArgs)
+    cargo run --release -- @(New-EpubicusOpenAiArgs)
 }
 
 Show-EpubicusOpenAiCommands
@@ -117,3 +117,4 @@ Show-EpubicusOpenAiCommands
 if (-not $NoRun) {
     Invoke-EpubicusOpenAi
 }
+
