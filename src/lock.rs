@@ -16,6 +16,7 @@ pub(crate) struct LockMetadata {
     pub(crate) pid: Option<u32>,
     pub(crate) hostname: Option<String>,
     pub(crate) purpose: Option<String>,
+    pub(crate) command: Option<String>,
     pub(crate) created_at: Option<String>,
     pub(crate) heartbeat_at: Option<String>,
 }
@@ -37,6 +38,10 @@ impl FileLock {
             match Self::create(path, purpose) {
                 Ok(lock) => return Ok(lock),
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if remove_stale_lock(path)? {
+                        announced = false;
+                        continue;
+                    }
                     if !announced {
                         eprintln!("waiting for lock {} ({purpose})", path.display());
                         announced = true;
@@ -132,7 +137,33 @@ fn is_stale_lock(metadata: &LockMetadata) -> bool {
     if !hostname.eq_ignore_ascii_case(&current_hostname()) {
         return false;
     }
-    !process_is_running(pid)
+    let Some(process) = process_snapshot(pid) else {
+        return true;
+    };
+    if let Some(created_at) = metadata
+        .created_at
+        .as_deref()
+        .and_then(parse_rfc3339_utc)
+    {
+        if process.started_at > created_at + chrono::TimeDelta::seconds(2) {
+            return true;
+        }
+    }
+    if let Some(command) = metadata.command.as_deref() {
+        let command = command.to_ascii_lowercase();
+        if command.contains("epubicus")
+            && !process.command_line.to_ascii_lowercase().contains("epubicus")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 fn parse_lock_metadata(data: &str) -> Result<LockMetadata> {
@@ -145,6 +176,7 @@ fn parse_lock_metadata(data: &str) -> Result<LockMetadata> {
             "pid" => metadata.pid = value.parse().ok(),
             "hostname" => metadata.hostname = Some(value.to_string()),
             "purpose" => metadata.purpose = Some(value.to_string()),
+            "command" => metadata.command = Some(value.to_string()),
             "created_at" => metadata.created_at = Some(value.to_string()),
             "heartbeat_at" => metadata.heartbeat_at = Some(value.to_string()),
             _ => {}
@@ -160,22 +192,70 @@ fn current_hostname() -> String {
 }
 
 #[cfg(windows)]
-fn process_is_running(pid: u32) -> bool {
+fn process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
     let script = format!(
-        "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+        "$p = Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" -ErrorAction SilentlyContinue; \
+if ($null -eq $p) {{ exit 1 }}; \
+$start = $null; \
+try {{ $start = (Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o') }} catch {{}}; \
+[pscustomobject]@{{ start = $start; command = $p.CommandLine }} | ConvertTo-Json -Compress"
     );
     let Ok(output) = Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
         .output()
     else {
-        return true;
+        return process_snapshot_fallback(pid);
     };
-    output.status.success()
+    if !output.status.success() {
+        return process_snapshot_fallback(pid);
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let started_at = value["start"]
+        .as_str()
+        .and_then(parse_rfc3339_utc)
+        .unwrap_or_else(chrono::Utc::now);
+    let command_line = value["command"].as_str().unwrap_or_default().to_string();
+    Some(ProcessSnapshot {
+        started_at,
+        command_line,
+    })
+}
+
+#[cfg(windows)]
+fn process_snapshot_fallback(pid: u32) -> Option<ProcessSnapshot> {
+    let filter = format!("PID eq {pid}");
+    let Ok(output) = Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?.trim();
+    if line.is_empty() || line.starts_with("INFO:") {
+        return None;
+    }
+    Some(ProcessSnapshot {
+        started_at: chrono::Utc::now(),
+        command_line: line.to_string(),
+    })
 }
 
 #[cfg(not(windows))]
-fn process_is_running(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+fn process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+    let path = Path::new("/proc").join(pid.to_string());
+    path.exists().then(|| ProcessSnapshot {
+        started_at: chrono::Utc::now(),
+        command_line: String::new(),
+    })
+}
+
+struct ProcessSnapshot {
+    started_at: chrono::DateTime<chrono::Utc>,
+    command_line: String,
 }
 
 impl Drop for FileLock {
@@ -199,6 +279,26 @@ mod tests {
         assert!(!path.exists());
         let _lock = FileLock::acquire(&path, "test")?;
         assert!(path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_replaces_stale_lock_before_waiting() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test.lock");
+        fs::write(
+            &path,
+            format!(
+                "pid=999999\nhostname={}\npurpose=stale\ncreated_at=old\nheartbeat_at=old\n",
+                current_hostname()
+            ),
+        )?;
+
+        let _lock = FileLock::acquire(&path, "test")?;
+        let data = fs::read_to_string(&path)?;
+
+        assert!(data.contains(&format!("pid={}", std::process::id())));
+        assert!(data.contains("purpose=test"));
         Ok(())
     }
 

@@ -1,6 +1,5 @@
 use super::*;
 use std::collections::BTreeMap;
-
 pub(super) fn batch_health(args: BatchHealthArgs) -> Result<()> {
     let health = collect_batch_health(&args)?;
     print_batch_health(&health);
@@ -62,11 +61,20 @@ pub(super) fn collect_batch_health(args: &BatchHealthArgs) -> Result<BatchHealth
 
     let mut state_counts = BTreeMap::new();
     let mut cache_backed_items = 0usize;
+    let mut cache_backed_pending_items = 0usize;
+    let mut effective_remaining_items = 0usize;
     let mut oldest_pending_at = None::<String>;
     for item in &work_items {
         *state_counts.entry(item.state.clone()).or_insert(0) += 1;
-        if cache.peek(&item.cache_key).is_some() {
+        let has_cache = cache.peek(&item.cache_key).is_some();
+        if has_cache {
             cache_backed_items += 1;
+        }
+        if !is_completed_item_state(&item.state) && has_cache {
+            cache_backed_pending_items += 1;
+        }
+        if !is_completed_item_state(&item.state) && !has_cache {
+            effective_remaining_items += 1;
         }
         if !is_completed_item_state(&item.state) {
             oldest_pending_at = match oldest_pending_at {
@@ -102,6 +110,8 @@ pub(super) fn collect_batch_health(args: &BatchHealthArgs) -> Result<BatchHealth
         work_item_count: work_items.len(),
         state_counts,
         cache_backed_items,
+        cache_backed_pending_items,
+        effective_remaining_items,
         rejected_file_count,
         error_file_count,
         import_report,
@@ -159,6 +169,16 @@ fn print_batch_health(health: &BatchHealth) {
     println!(
         "cache-backed: {}/{}",
         health.cache_backed_items, health.work_item_count
+    );
+    if health.cache_backed_pending_items > 0 {
+        println!(
+            "cache-backed but still pending state: {}",
+            health.cache_backed_pending_items
+        );
+    }
+    println!(
+        "effective remaining: {}",
+        health.effective_remaining_items
     );
     println!("rejected lines: {}", health.rejected_file_count);
     println!("error lines: {}", health.error_file_count);
@@ -328,7 +348,8 @@ pub(super) fn collect_batch_verify(args: &BatchVerifyArgs) -> Result<BatchVerify
         }
 
         let cached = cache.peek(&item.cache_key);
-        let cache_backed_state = matches!(item.state.as_str(), "imported" | "local_imported");
+        let cache_backed_state =
+            matches!(item.state.as_str(), "imported" | "local_imported" | "skipped");
         if cache_backed_state && cached.is_none() {
             cache_conflict.push(VerifyFinding::from_work_item(
                 item,
@@ -341,6 +362,9 @@ pub(super) fn collect_batch_verify(args: &BatchVerifyArgs) -> Result<BatchVerify
             ));
         }
         if let Some(translated) = cached {
+            if item.state == "skipped" && translated == item.source_text {
+                continue;
+            }
             if let Err(err) = validate_translation_response(&item.source_text, translated) {
                 invalid_cache.push(VerifyFinding::from_work_item(item, &err.to_string()));
             }

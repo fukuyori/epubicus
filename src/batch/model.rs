@@ -27,6 +27,8 @@ pub(super) struct BatchHealth {
     pub(super) work_item_count: usize,
     pub(super) state_counts: BTreeMap<String, usize>,
     pub(super) cache_backed_items: usize,
+    pub(super) cache_backed_pending_items: usize,
+    pub(super) effective_remaining_items: usize,
     pub(super) rejected_file_count: usize,
     pub(super) error_file_count: usize,
     pub(super) import_report: Option<ImportReport>,

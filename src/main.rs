@@ -1286,7 +1286,13 @@ mod tests {
         assert!(translations_path.exists());
 
         let mut loaded = CacheStore::from_args(&input, &args)?;
-        assert_eq!(loaded.get("abc").as_deref(), Some("訳文"));
+        assert_eq!(
+            loaded
+                .get_record("abc")
+                .map(|entry| entry.translated)
+                .as_deref(),
+            Some("訳文")
+        );
         assert_eq!(loaded.stats.hits, 1);
 
         let params = ManifestParams {
@@ -1351,6 +1357,66 @@ mod tests {
         }
         assert_eq!(translator.cache.stats.misses, 1);
         assert_eq!(translator.cache.stats.writes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn partial_from_cache_accepts_reference_passthrough_cache() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cache_root = dir.path().join("cache");
+        let input = dir.path().join("book.epub");
+        let source = "Reuters, Example Title, https://example.com".to_string();
+        fs::write(&input, b"dummy")?;
+        let args = CommonArgs {
+            provider: Provider::Ollama,
+            model: Some(DEFAULT_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
+            ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
+            claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
+            openai_api_key: None,
+            anthropic_api_key: None,
+            prompt_api_key: false,
+            temperature: 0.3,
+            num_ctx: 8192,
+            timeout_secs: 900,
+            retries: 3,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
+            style: "essay".to_string(),
+            glossary: None,
+            cache_root: Some(cache_root),
+            no_cache: false,
+            clear_cache: false,
+            keep_cache: false,
+            usage_only: false,
+            partial_from_cache: true,
+            passthrough_on_validation_failure: false,
+            verbose: false,
+            dry_run: false,
+        };
+        let mut cache = CacheStore::from_args(&input, &args)?;
+        let key = cache_key(Provider::Ollama, DEFAULT_MODEL, "essay", &source, &[]);
+        cache.insert(CacheRecord {
+            key,
+            translated: source.clone(),
+            provider: "reference_passthrough".to_string(),
+            model: "reference_passthrough".to_string(),
+            at: "2026-05-04T00:00:00Z".to_string(),
+        })?;
+        let mut translator = Translator::new(args, cache)?;
+
+        match translator.translate_many(&[source.clone()], None)?.remove(0)
+        {
+            Translation::Translated { text, from_cache } => {
+                assert_eq!(text, source);
+                assert!(from_cache);
+            }
+            Translation::Original { .. } => bail!("unexpected passthrough original result"),
+        }
+        assert_eq!(translator.cache.stats.hits, 1);
+        assert_eq!(translator.cache.stats.misses, 0);
         Ok(())
     }
 

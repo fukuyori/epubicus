@@ -303,7 +303,11 @@ pub(super) fn batch_retry_requests(args: BatchRetryArgs) -> Result<()> {
 
 fn retry_state_filter(states: &[String]) -> HashSet<String> {
     let selected = if states.is_empty() {
-        vec!["failed".to_string(), "rejected".to_string()]
+        vec![
+            "failed".to_string(),
+            "rejected".to_string(),
+            "local_exhausted".to_string(),
+        ]
     } else {
         states
             .iter()
@@ -398,13 +402,13 @@ pub(super) fn batch_import(args: BatchImportArgs) -> Result<()> {
             }
             Err(err) => {
                 item.state = "rejected".to_string();
-                item.last_error = Some(err.to_string());
+                item.last_error = Some(format!("{err:#}"));
                 item.updated_at = now.clone();
                 rejected.push(RejectedLine {
                     custom_id: item.custom_id.clone(),
                     cache_key: item.cache_key.clone(),
                     source_hash: item.source_hash.clone(),
-                    error: err.to_string(),
+                    error: format!("{err:#}"),
                 });
             }
         }

@@ -2,6 +2,25 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.4.0 - 2026-05-04
+
+### Added
+
+- Added `docs/batch-translate-local.ja.md` for the `batch translate-local` flow, including progress display, stop conditions, `last_error`, and recovery choices.
+- Added `docs/common-processing.ja.md` to map shared processing paths such as locks, cache, validation, recovery records, batch state transitions, and progress handling.
+
+### Changed
+
+- `batch translate-local` now saves item state as it progresses, shows completed/error counts in progress output, and records fuller provider error details in `last_error`.
+- Local batch retry now separates reference-like untranslated blocks from prose-like blocks, so reference-style content is quickly moved out of the local retry lane instead of consuming repeated paid retries.
+- Reference passthrough cache entries are now treated as intentional original preservation during `--partial-from-cache` assembly and batch verification.
+
+### Fixed
+
+- Recovered stale input `run.lock` and batch lock files more reliably after interrupted runs.
+- Stopped local batch processing immediately on provider authentication failures and on long stalls where requests increase without new completed items.
+- Prevented intentionally preserved reference blocks from being emitted again as untranslated recovery records during final EPUB assembly.
+
 ## 0.3.9 - 2026-05-03
 
 ### Added

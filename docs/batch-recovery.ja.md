@@ -74,6 +74,8 @@ cargo run -- batch translate-local .\book.epub `
   --glossary .\glossary.json
 ```
 
+`batch translate-local` は、認証エラーで即停止し、課金だけ進む停滞や解決見込みの低い block は `local_exhausted` に回します。文献・参考文献のように原文維持で閉じると決めた block は `skipped` として確定できます。進捗表示、停止条件、`last_error` の読み方は [batch translate-local 運用メモ](batch-translate-local.ja.md) を参照してください。
+
 時間がかかる場合は `--limit` を付けて分割実行します。
 
 ```powershell
@@ -110,6 +112,8 @@ after translate-local:
   imported: 5407
   local_imported: 511
 ```
+
+文献系を原文維持で確定した場合は、`skipped` が増え、`effective remaining` から外れます。
 
 ## EPUB を再生成する
 

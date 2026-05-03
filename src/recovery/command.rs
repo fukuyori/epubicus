@@ -7,7 +7,7 @@ use crate::{
     cache::{CacheStore, newest_recovery_log_for_target},
     config::{Provider, RecoverArgs, TranslateArgs},
     translate_command,
-    translator::Translator,
+    translator::{Translator, is_provider_auth_error},
 };
 
 pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
@@ -102,8 +102,14 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
                 recovered += 1;
             }
             Err(err) => {
+                if is_provider_auth_error(&err) {
+                    return Err(err).context(format!(
+                        "recovery aborted after provider authentication/configuration failure at p{} b{} {}",
+                        record.page_no, record.block_index, record.href
+                    ));
+                }
                 let mut failed = record.clone();
-                failed.error = Some(err.to_string());
+                failed.error = Some(format!("{err:#}"));
                 print_unrecoverable(&failed);
                 unrecoverable.push(failed);
             }

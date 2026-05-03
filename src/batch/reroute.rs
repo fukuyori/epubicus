@@ -1,7 +1,20 @@
 use super::*;
 use std::collections::HashSet;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
-use crate::{cache::CacheRecord, translator::Translator};
+use indicatif::{ProgressBar, ProgressStyle};
+use crate::{
+    cache::CacheRecord,
+    translator::{
+        Translator, ValidationFailureReason, is_provider_auth_error, is_reference_like_source,
+        validation_failure_reason,
+    },
+};
+
+const LOCAL_STALL_ABORT_ELAPSED: Duration = Duration::from_secs(10 * 60);
+const LOCAL_STALL_ABORT_REQUESTS: u64 = 20;
+const LOCAL_BLOCK_REQUEST_BUDGET: u64 = 3;
 
 pub(super) fn batch_reroute_local(args: BatchRerouteLocalArgs) -> Result<()> {
     let summary = reroute_local_items(&args)?;
@@ -144,59 +157,153 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
     let mut processed_count = 0usize;
     let limit = args.limit.unwrap_or(usize::MAX);
     let candidate_indices = prioritized_indices(&work_items, args.priority);
+    let mut stall_guard = LocalTranslateStallGuard::new(translator.api_usage_snapshot());
+    let pending_total = candidate_indices
+        .iter()
+        .filter(|&&idx| work_items[idx].state == "local_pending")
+        .take(limit)
+        .count();
+    let progress = ProgressBar::new(pending_total as u64);
+    progress.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {bar:20.cyan/blue} {pos}/{len} | {msg}",
+        )?
+        .progress_chars("=> "),
+    );
+    progress.set_message("preparing local_pending items");
 
     for idx in candidate_indices {
         if processed_count >= limit {
             break;
         }
-        let item = &mut work_items[idx];
-        if item.state != "local_pending" {
-            continue;
-        }
-        processed_count += 1;
-        if translator.cache.peek(&item.cache_key).is_some() {
-            item.state = "local_imported".to_string();
-            item.last_error = None;
-            item.updated_at = chrono::Utc::now().to_rfc3339();
-            cached_count += 1;
-            continue;
-        }
-
-        match translator.translate_uncached_source(&item.source_text) {
-            Ok((translated, provider, model, fallback_used)) => {
-                translator.cache.insert(CacheRecord {
-                    key: item.cache_key.clone(),
-                    translated,
-                    provider: provider.to_string(),
-                    model,
-                    at: chrono::Utc::now().to_rfc3339(),
-                })?;
+        let (page_index, block_index, href, abort_error) = {
+            let item = &mut work_items[idx];
+            if item.state != "local_pending" {
+                continue;
+            }
+            processed_count += 1;
+            progress.set_message(local_progress_message(
+                translated_count,
+                cached_count,
+                failed_count,
+                item.page_index + 1,
+                &item.href,
+            ));
+            if is_reference_like_local_batch_source(&item.source_text) {
+                item.state = "local_exhausted".to_string();
+                item.last_error = Some(
+                    "skipped local batch retry for reference-like block | suggested_action=inspect_reference_or_try_another_provider".to_string(),
+                );
+                item.updated_at = chrono::Utc::now().to_rfc3339();
+                failed_count += 1;
+                (
+                    item.page_index,
+                    item.block_index,
+                    item.href.clone(),
+                    None,
+                )
+            } else if translator.cache.peek(&item.cache_key).is_some() {
                 item.state = "local_imported".to_string();
                 item.last_error = None;
                 item.updated_at = chrono::Utc::now().to_rfc3339();
-                if fallback_used {
-                    translator.fallback_count += 1;
+                cached_count += 1;
+                (item.page_index, item.block_index, item.href.clone(), None)
+            } else {
+                let usage_before = translator.api_usage_snapshot();
+                match translator.translate_uncached_source(&item.source_text) {
+                    Ok((translated, provider, model, fallback_used)) => {
+                        translator.cache.insert(CacheRecord {
+                            key: item.cache_key.clone(),
+                            translated,
+                            provider: provider.to_string(),
+                            model,
+                            at: chrono::Utc::now().to_rfc3339(),
+                        })?;
+                        item.state = "local_imported".to_string();
+                        item.last_error = None;
+                        item.updated_at = chrono::Utc::now().to_rfc3339();
+                        if fallback_used {
+                            translator.fallback_count += 1;
+                        }
+                        translated_count += 1;
+                        (item.page_index, item.block_index, item.href.clone(), None)
+                    }
+                    Err(err) => {
+                        let usage_after = translator.api_usage_snapshot();
+                        let error_text = local_batch_error_text(
+                            &err,
+                            &item.source_text,
+                            usage_before,
+                            usage_after,
+                        );
+                        item.last_error = Some(error_text.clone());
+                        item.updated_at = chrono::Utc::now().to_rfc3339();
+                        if should_exhaust_local_batch_error(
+                            &err,
+                            &item.source_text,
+                            usage_before,
+                            usage_after,
+                        ) {
+                            item.state = "local_exhausted".to_string();
+                        }
+                        failed_count += 1;
+                        let abort_error = should_abort_local_batch_error(&err).then(|| {
+                            format!(
+                                "batch translate-local aborted after provider authentication/configuration failure at p{} b{} {}",
+                                item.page_index, item.block_index, item.href
+                            )
+                        });
+                        (item.page_index, item.block_index, item.href.clone(), abort_error)
+                    }
                 }
-                translated_count += 1;
             }
-            Err(err) => {
-                item.last_error = Some(err.to_string());
-                item.updated_at = chrono::Utc::now().to_rfc3339();
-                failed_count += 1;
-            }
+        };
+        persist_translate_local_progress(
+            &manifest_path,
+            &work_items_path,
+            &mut manifest,
+            &work_items,
+        )?;
+        if let Some(message) = abort_error {
+            return Err(crate::recoverable_error(message));
         }
+        let stall_error = stall_guard.observe(
+            translated_count + cached_count,
+            failed_count,
+            translator.api_usage_snapshot(),
+            page_index,
+            block_index,
+            &href,
+        );
+        if let Some(message) = stall_error {
+            let item = &mut work_items[idx];
+            item.state = "local_exhausted".to_string();
+            let combined = match item.last_error.as_deref() {
+                Some(previous) if !previous.trim().is_empty() => {
+                    format!("{previous} | {message}")
+                }
+                _ => message.clone(),
+            };
+            item.last_error = Some(combined);
+            item.updated_at = chrono::Utc::now().to_rfc3339();
+            persist_translate_local_progress(
+                &manifest_path,
+                &work_items_path,
+                &mut manifest,
+                &work_items,
+            )?;
+            return Err(crate::recoverable_error(message));
+        }
+        progress.inc(1);
     }
 
-    if translated_count > 0 || cached_count > 0 || failed_count > 0 {
-        manifest.updated_at = chrono::Utc::now().to_rfc3339();
-        if work_items.iter().any(|item| item.state == "local_pending") {
-            manifest.status = "local_pending".to_string();
-        } else {
-            manifest.status = "local_imported".to_string();
-        }
-        write_jsonl_atomic(&work_items_path, work_items.iter())?;
-        write_json_pretty_atomic(&manifest_path, &manifest)?;
-    }
+    progress.finish_with_message(format!(
+        "done: {} completed, {} errors | {} translated, {} cached",
+        translated_count + cached_count,
+        failed_count,
+        translated_count,
+        cached_count
+    ));
 
     Ok(TranslateLocalSummary {
         batch_dir,
@@ -207,8 +314,247 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
     })
 }
 
+fn local_progress_message(
+    translated_count: usize,
+    cached_count: usize,
+    failed_count: usize,
+    page_no: usize,
+    href: &str,
+) -> String {
+    let completed_count = translated_count + cached_count;
+    let name = Path::new(href)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(href);
+    format!(
+        "ok{completed_count} err{failed_count} | t{translated_count} c{cached_count} | p{page_no} {name}"
+    )
+}
+
+fn persist_translate_local_progress(
+    manifest_path: &Path,
+    work_items_path: &Path,
+    manifest: &mut BatchManifest,
+    work_items: &[WorkItem],
+) -> Result<()> {
+    manifest.updated_at = chrono::Utc::now().to_rfc3339();
+    if work_items.iter().any(|item| item.state == "local_pending") {
+        manifest.status = "local_pending".to_string();
+    } else if work_items
+        .iter()
+        .any(|item| item.state == "local_exhausted")
+    {
+        manifest.status = "local_exhausted".to_string();
+    } else {
+        manifest.status = "local_imported".to_string();
+    }
+    write_jsonl_atomic(work_items_path, work_items.iter())?;
+    write_json_pretty_atomic(manifest_path, manifest)?;
+    Ok(())
+}
+
+struct LocalTranslateStallGuard {
+    started: Instant,
+    baseline_completed: usize,
+    baseline_usage: crate::usage::ApiUsage,
+}
+
+impl LocalTranslateStallGuard {
+    fn new(usage: crate::usage::ApiUsage) -> Self {
+        Self {
+            started: Instant::now(),
+            baseline_completed: 0,
+            baseline_usage: usage,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        completed_count: usize,
+        failed_count: usize,
+        usage: crate::usage::ApiUsage,
+        page_index: usize,
+        block_index: usize,
+        href: &str,
+    ) -> Option<String> {
+        if completed_count > self.baseline_completed {
+            self.started = Instant::now();
+            self.baseline_completed = completed_count;
+            self.baseline_usage = usage;
+            return None;
+        }
+        if !should_abort_stalled_local_work(
+            self.started.elapsed(),
+            self.baseline_usage,
+            usage,
+            self.baseline_completed,
+            completed_count,
+        ) {
+            return None;
+        }
+        Some(format!(
+            "batch translate-local stalled: {} completed, {} errors; no new completions for {} while API requests increased by {}; current item p{} b{} {}",
+            completed_count,
+            failed_count,
+            format_stall_duration(self.started.elapsed()),
+            usage.requests.saturating_sub(self.baseline_usage.requests),
+            page_index,
+            block_index,
+            href
+        ))
+    }
+}
+
+fn should_abort_stalled_local_work(
+    elapsed: Duration,
+    baseline_usage: crate::usage::ApiUsage,
+    usage: crate::usage::ApiUsage,
+    baseline_completed: usize,
+    completed_count: usize,
+) -> bool {
+    elapsed >= LOCAL_STALL_ABORT_ELAPSED
+        && completed_count == baseline_completed
+        && usage.requests
+            >= baseline_usage
+                .requests
+                .saturating_add(LOCAL_STALL_ABORT_REQUESTS)
+}
+
+fn format_stall_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    format!("{minutes}m {seconds:02}s")
+}
+
+fn should_abort_local_batch_error(err: &anyhow::Error) -> bool {
+    is_provider_auth_error(err)
+}
+
+fn should_exhaust_local_batch_error(
+    err: &anyhow::Error,
+    source_text: &str,
+    usage_before: crate::usage::ApiUsage,
+    usage_after: crate::usage::ApiUsage,
+) -> bool {
+    if matches!(
+        classify_untranslated_segment_for_local_batch(err, source_text),
+        Some(LocalBatchUntranslatedSegment::ReferenceLike)
+    ) {
+        return true;
+    }
+    if matches!(
+        validation_failure_reason(err),
+        Some(
+            ValidationFailureReason::PromptLeak
+                | ValidationFailureReason::MissingPlaceholder
+                | ValidationFailureReason::UnchangedSource
+                | ValidationFailureReason::RefusalOrExplanation
+        )
+    ) {
+        return true;
+    }
+    usage_after.requests.saturating_sub(usage_before.requests) >= LOCAL_BLOCK_REQUEST_BUDGET
+}
+
+fn local_batch_error_text(
+    err: &anyhow::Error,
+    source_text: &str,
+    usage_before: crate::usage::ApiUsage,
+    usage_after: crate::usage::ApiUsage,
+) -> String {
+    let mut text = format!("{err:#}");
+    let request_delta = usage_after.requests.saturating_sub(usage_before.requests);
+    if request_delta >= LOCAL_BLOCK_REQUEST_BUDGET {
+        text.push_str(&format!(
+            " | local request budget exceeded: {} request(s) used (limit {})",
+            request_delta, LOCAL_BLOCK_REQUEST_BUDGET
+        ));
+    }
+    if let Some(reason) = validation_failure_reason(err) {
+        text.push_str(&format!(" | validation_reason={}", reason.as_str()));
+    }
+    text.push_str(&format!(
+        " | suggested_action={}",
+        suggested_action_for_local_batch_error(err, source_text, usage_before, usage_after)
+    ));
+    text
+}
+
+fn suggested_action_for_local_batch_error(
+    err: &anyhow::Error,
+    source_text: &str,
+    usage_before: crate::usage::ApiUsage,
+    usage_after: crate::usage::ApiUsage,
+) -> &'static str {
+    if is_provider_auth_error(err) {
+        return "fix_provider_auth";
+    }
+    if is_reference_like_local_batch_source(source_text) {
+        return "inspect_reference_or_try_another_provider";
+    }
+    if usage_after.requests.saturating_sub(usage_before.requests) >= LOCAL_BLOCK_REQUEST_BUDGET {
+        return "batch_retry_requests_or_try_another_provider";
+    }
+    match validation_failure_reason(err) {
+        Some(ValidationFailureReason::MissingPlaceholder) => {
+            "retry_translation_or_inspect_inline"
+        }
+        Some(ValidationFailureReason::UntranslatedSegment)
+            if matches!(
+                classify_untranslated_segment_for_local_batch(err, source_text),
+                Some(LocalBatchUntranslatedSegment::ReferenceLike)
+            ) =>
+        {
+            "inspect_reference_or_try_another_provider"
+        }
+        Some(
+            ValidationFailureReason::UnchangedSource
+            | ValidationFailureReason::UntranslatedText
+            | ValidationFailureReason::UntranslatedSegment,
+        ) => "retry_translation",
+        Some(
+            ValidationFailureReason::PromptLeak
+            | ValidationFailureReason::RefusalOrExplanation
+            | ValidationFailureReason::Empty,
+        ) => "retry_translation",
+        Some(ValidationFailureReason::Truncated) => "retry_translation",
+        None => "inspect_manually",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalBatchUntranslatedSegment {
+    ReferenceLike,
+    ProseLike,
+}
+
+fn classify_untranslated_segment_for_local_batch(
+    err: &anyhow::Error,
+    source_text: &str,
+) -> Option<LocalBatchUntranslatedSegment> {
+    if validation_failure_reason(err) != Some(ValidationFailureReason::UntranslatedSegment) {
+        return None;
+    }
+    if is_reference_like_untranslated_segment(source_text) {
+        Some(LocalBatchUntranslatedSegment::ReferenceLike)
+    } else {
+        Some(LocalBatchUntranslatedSegment::ProseLike)
+    }
+}
+
+fn is_reference_like_untranslated_segment(source_text: &str) -> bool {
+    is_reference_like_local_batch_source(source_text)
+}
+
+fn is_reference_like_local_batch_source(source_text: &str) -> bool {
+    is_reference_like_source(source_text)
+}
+
 fn is_remaining_item(item: &WorkItem, cache: &CacheStore) -> bool {
-    !is_finished_item(item, cache) && item.state != "local_pending"
+    !is_finished_item(item, cache)
+        && item.state != "local_pending"
+        && item.state != "local_exhausted"
 }
 
 fn is_finished_item(item: &WorkItem, cache: &CacheStore) -> bool {
@@ -252,7 +598,7 @@ pub(super) fn prioritized_indices(work_items: &[WorkItem], priority: BatchPriori
 
 fn state_rank(state: &str) -> usize {
     match state {
-        "failed" | "rejected" => 0,
+        "failed" | "rejected" | "local_exhausted" => 0,
         "local_pending" => 1,
         "submitted" => 2,
         "prepared" => 3,
@@ -282,4 +628,123 @@ struct TranslateLocalSummary {
     translated_count: usize,
     cached_count: usize,
     failed_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_local_work_aborts_after_request_growth_without_completions() {
+        assert!(should_abort_stalled_local_work(
+            LOCAL_STALL_ABORT_ELAPSED,
+            crate::usage::ApiUsage {
+                requests: 1,
+                ..Default::default()
+            },
+            crate::usage::ApiUsage {
+                requests: 21,
+                ..Default::default()
+            },
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn stalled_local_work_does_not_abort_after_completion_progress() {
+        assert!(!should_abort_stalled_local_work(
+            LOCAL_STALL_ABORT_ELAPSED,
+            crate::usage::ApiUsage {
+                requests: 1,
+                ..Default::default()
+            },
+            crate::usage::ApiUsage {
+                requests: 30,
+                ..Default::default()
+            },
+            0,
+            1,
+        ));
+    }
+
+    #[test]
+    fn auth_errors_abort_local_batch_immediately() {
+        let err = anyhow::anyhow!(
+            "failed to call OpenAI after 1 attempt(s): OpenAI HTTP 401 Unauthorized: invalid_api_key"
+        );
+        assert!(should_abort_local_batch_error(&err));
+    }
+
+    #[test]
+    fn non_retryable_validation_exhausts_local_batch_item() {
+        let err = crate::translator::validate_translation_response(
+            "before ⟦S1⟧ after",
+            "before after",
+        )
+        .unwrap_err();
+        assert!(should_exhaust_local_batch_error(
+            &err,
+            "before ⟦S1⟧ after",
+            crate::usage::ApiUsage::default(),
+            crate::usage::ApiUsage::default(),
+        ));
+    }
+
+    #[test]
+    fn request_budget_exhausts_local_batch_item() {
+        assert!(should_exhaust_local_batch_error(
+            &anyhow::anyhow!("failed to call OpenAI"),
+            "normal source text",
+            crate::usage::ApiUsage {
+                requests: 1,
+                ..Default::default()
+            },
+            crate::usage::ApiUsage {
+                requests: 4,
+                ..Default::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn untranslated_segment_records_retry_translation_action() {
+        let err = crate::translator::validate_translation_response(
+            "This is a long English sentence that should be translated into Japanese.",
+            "This is a long English sentence that should be translated into Japanese.",
+        )
+        .unwrap_err();
+        let text = local_batch_error_text(
+            &err,
+            "This is a long English sentence that should be translated into Japanese.",
+            crate::usage::ApiUsage::default(),
+            crate::usage::ApiUsage {
+                requests: 1,
+                ..Default::default()
+            },
+        );
+        assert!(text.contains("suggested_action=retry_translation"));
+    }
+
+    #[test]
+    fn reference_like_untranslated_segment_is_exhausted() {
+        let source =
+            "⟦E1⟧6⟦/E1⟧. Michael Lierow, Sebastian Jannsen, and Joris D’Inca, “Amazon Is Using Logistics to Lead a Retail Revolution,” ⟦E2⟧Forbes⟦/E2⟧ (February 21, 2016), ⟦E3⟧https://www.forbes.com/example⟦/E3⟧";
+        let err = crate::translator::validate_translation_response(source, source).unwrap_err();
+        assert!(should_exhaust_local_batch_error(
+            &err,
+            source,
+            crate::usage::ApiUsage::default(),
+            crate::usage::ApiUsage::default(),
+        ));
+        let text = local_batch_error_text(
+            &err,
+            source,
+            crate::usage::ApiUsage::default(),
+            crate::usage::ApiUsage::default(),
+        );
+        assert!(text.contains(
+            "suggested_action=inspect_reference_or_try_another_provider"
+        ));
+    }
 }

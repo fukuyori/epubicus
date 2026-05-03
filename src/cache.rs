@@ -29,6 +29,13 @@ pub(crate) struct CacheRecord {
     pub(crate) at: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CachedTranslation {
+    pub(crate) translated: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct CacheStats {
     pub(crate) hits: usize,
@@ -84,7 +91,7 @@ pub(crate) struct CacheStore {
     pub(crate) input_hash: String,
     /// Full SHA-256 hex of the input EPUB.
     pub(crate) input_sha256: String,
-    pub(crate) entries: HashMap<String, String>,
+    pub(crate) entries: HashMap<String, CachedTranslation>,
     pub(crate) stats: CacheStats,
     pub(crate) keep_cache: bool,
 }
@@ -138,7 +145,7 @@ impl CacheStore {
         })
     }
 
-    pub(crate) fn get(&mut self, key: &str) -> Option<String> {
+    pub(crate) fn get_record(&mut self, key: &str) -> Option<CachedTranslation> {
         if !self.enabled {
             self.stats.misses += 1;
             return None;
@@ -157,8 +164,12 @@ impl CacheStore {
 
     pub(crate) fn peek(&self, key: &str) -> Option<&str> {
         self.enabled
-            .then(|| self.entries.get(key).map(String::as_str))
+            .then(|| self.entries.get(key).map(|entry| entry.translated.as_str()))
             .flatten()
+    }
+
+    pub(crate) fn peek_record(&self, key: &str) -> Option<&CachedTranslation> {
+        self.enabled.then(|| self.entries.get(key)).flatten()
     }
 
     pub(crate) fn invalidate(&mut self, key: &str) {
@@ -174,9 +185,9 @@ impl CacheStore {
         let _lock = FileLock::acquire(&self.lock_path, "write cache")?;
         let disk_entries = read_cache_entries(&self.translations_path)?;
         if let Some(existing) = disk_entries.get(&record.key) {
-            if existing == &record.translated {
+            if existing.translated == record.translated {
                 self.entries
-                    .insert(record.key.clone(), record.translated.clone());
+                    .insert(record.key.clone(), existing.clone());
             } else {
                 self.entries.insert(record.key.clone(), existing.clone());
             }
@@ -193,7 +204,14 @@ impl CacheStore {
         writeln!(file)?;
         file.flush()?;
         self.entries
-            .insert(record.key.clone(), record.translated.clone());
+            .insert(
+                record.key.clone(),
+                CachedTranslation {
+                    translated: record.translated.clone(),
+                    provider: record.provider,
+                    model: record.model,
+                },
+            );
         self.stats.writes += 1;
         Ok(())
     }
@@ -328,7 +346,7 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn read_cache_entries(path: &Path) -> Result<HashMap<String, String>> {
+fn read_cache_entries(path: &Path) -> Result<HashMap<String, CachedTranslation>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
@@ -343,7 +361,14 @@ fn read_cache_entries(path: &Path) -> Result<HashMap<String, String>> {
         }
         let record: CacheRecord = serde_json::from_str(&line)
             .with_context(|| format!("failed to parse cache line {}", line_no + 1))?;
-        entries.insert(record.key, record.translated);
+        entries.insert(
+            record.key,
+            CachedTranslation {
+                translated: record.translated,
+                provider: record.provider,
+                model: record.model,
+            },
+        );
     }
     Ok(entries)
 }
@@ -450,7 +475,10 @@ mod tests {
         second.insert(record("abc", "訳文"))?;
 
         let entries = read_cache_entries(&first.translations_path)?;
-        assert_eq!(entries.get("abc").map(String::as_str), Some("訳文"));
+        assert_eq!(
+            entries.get("abc").map(|entry| entry.translated.as_str()),
+            Some("訳文")
+        );
         assert_eq!(second.stats.writes, 0);
         Ok(())
     }
@@ -468,8 +496,17 @@ mod tests {
         second.insert(record("abc", "訳文B"))?;
 
         let entries = read_cache_entries(&first.translations_path)?;
-        assert_eq!(entries.get("abc").map(String::as_str), Some("訳文A"));
-        assert_eq!(second.entries.get("abc").map(String::as_str), Some("訳文A"));
+        assert_eq!(
+            entries.get("abc").map(|entry| entry.translated.as_str()),
+            Some("訳文A")
+        );
+        assert_eq!(
+            second
+                .entries
+                .get("abc")
+                .map(|entry| entry.translated.as_str()),
+            Some("訳文A")
+        );
         assert_eq!(second.stats.writes, 0);
         Ok(())
     }

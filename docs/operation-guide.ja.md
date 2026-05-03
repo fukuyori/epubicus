@@ -2,6 +2,7 @@
 
 この文書は、日常的に EPUB を翻訳するときの実行手順をまとめたものです。
 細かな全オプションは README と `cargo run -- <command> --help` を確認してください。
+機能横断の共通処理を追いたい場合は [共通処理メモ](common-processing.ja.md) を参照してください。
 
 ## 基本方針
 
@@ -134,6 +135,7 @@ cargo run -- batch run .\book.epub --provider openai --model gpt-5-mini --wait -
 未翻訳が残る主な原因は、未キャッシュのブロックがある状態で `--partial-from-cache` によって組み立てた場合、またはモデル出力が検証で rejected / failed になった場合です。
 
 Batch API 実行後の復旧判断と詳細手順は [OpenAI Batch 翻訳の復旧手順](batch-recovery.ja.md) を参照してください。
+`batch translate-local` の停止条件、`local_exhausted`、`skipped`、`last_error` の読み方は [batch translate-local 運用メモ](batch-translate-local.ja.md) を参照してください。
 
 まず状態を確認します。
 

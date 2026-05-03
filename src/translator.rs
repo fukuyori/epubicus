@@ -11,13 +11,13 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use reqwest::blocking::Client;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    cache::{CacheRecord, CacheStore, ManifestParams, glossary_sha},
+    cache::{CacheRecord, CacheStore, CachedTranslation, ManifestParams, glossary_sha},
     config::{ANTHROPIC_VERSION, CommonArgs, Provider},
     default_model_for_provider,
     glossary::{GlossaryEntry, load_glossary},
@@ -415,11 +415,11 @@ impl Translator {
         }
         let glossary_subset = self.backend.glossary_subset(source);
         let key = self.cache_key(source, &glossary_subset);
-        if let Some(translated) = self.cache.get(&key) {
-            match validate_cached_translation(source, &translated) {
+        if let Some(cached) = self.cache.get_record(&key) {
+            match validate_cached_translation(source, &cached) {
                 Ok(()) => {
                     return Ok(Some(Translation::Translated {
-                        text: translated,
+                        text: cached.translated,
                         from_cache: true,
                     }));
                 }
@@ -454,8 +454,8 @@ impl Translator {
         let glossary_subset = self.backend.glossary_subset(source);
         let key = self.cache_key(source, &glossary_subset);
         self.cache
-            .peek(&key)
-            .is_some_and(|translated| validate_cached_translation(source, translated).is_ok())
+            .peek_record(&key)
+            .is_some_and(|cached| validate_cached_translation(source, cached).is_ok())
     }
 
     pub(crate) fn source_cache_key(&self, source: &str) -> String {
@@ -479,6 +479,10 @@ impl Translator {
 
     pub(crate) fn api_usage_summary(&self) -> Option<String> {
         self.backend.api_usage_summary()
+    }
+
+    pub(crate) fn api_usage_snapshot(&self) -> ApiUsage {
+        self.backend.api_usage_snapshot()
     }
 
     pub(crate) fn translate_uncached_source(
@@ -963,15 +967,8 @@ impl TranslationBackend {
     {
         let attempts = self.retries.saturating_add(1).max(1);
         for attempt in 1..=attempts {
-            let result = build()
-                .send()
-                .and_then(|response| response.error_for_status())
-                .and_then(|response| response.json::<T>());
-            match result {
-                Ok(value) => {
-                    self.adaptive_concurrency.record_success(provider);
-                    return Ok(value);
-                }
+            let response = match build().send() {
+                Ok(response) => response,
                 Err(err) if attempt < attempts && should_retry_request(&err) => {
                     self.adaptive_concurrency.reduce(provider, &err);
                     let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
@@ -982,10 +979,43 @@ impl TranslationBackend {
                         );
                     }
                     thread::sleep(Duration::from_secs(wait_secs));
+                    continue;
                 }
                 Err(err) => {
                     return Err(err).with_context(|| {
                         format!("failed to call {provider} after {attempt} attempt(s)")
+                    });
+                }
+            };
+            let status = response.status();
+            let body = response
+                .bytes()
+                .context("failed to read provider response body")?;
+            if !status.is_success() {
+                let detail = summarize_http_error_body(std::str::from_utf8(&body).unwrap_or(""));
+                let err = anyhow!("{provider} HTTP {status}: {detail}");
+                if attempt < attempts && (status.as_u16() == 429 || status.is_server_error()) {
+                    let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
+                    if self.verbose {
+                        eprintln!(
+                            "warning: {provider} request failed: {err}; retry {attempt}/{} in {wait_secs}s",
+                            self.retries
+                        );
+                    }
+                    thread::sleep(Duration::from_secs(wait_secs));
+                    continue;
+                }
+                return Err(err)
+                    .with_context(|| format!("failed to call {provider} after {attempt} attempt(s)"));
+            }
+            match serde_json::from_slice::<T>(&body) {
+                Ok(value) => {
+                    self.adaptive_concurrency.record_success(provider);
+                    return Ok(value);
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("failed to decode {provider} response after {attempt} attempt(s)")
                     });
                 }
             }
@@ -1006,6 +1036,10 @@ impl TranslationBackend {
         let usage = self.api_usage.lock().ok()?;
         (!usage.is_empty()).then(|| usage.summary())
     }
+
+    fn api_usage_snapshot(&self) -> ApiUsage {
+        self.api_usage.lock().map(|usage| *usage).unwrap_or_default()
+    }
 }
 
 fn should_retry_request(err: &reqwest::Error) -> bool {
@@ -1015,6 +1049,75 @@ fn should_retry_request(err: &reqwest::Error) -> bool {
     err.status()
         .map(|status| status.as_u16() == 429 || status.is_server_error())
         .unwrap_or(false)
+}
+
+fn summarize_http_error_body(body: &str) -> String {
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "(empty response body)".to_string();
+    }
+    const MAX_CHARS: usize = 240;
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+    let cut = normalized
+        .char_indices()
+        .nth(MAX_CHARS)
+        .map(|(idx, _)| idx)
+        .unwrap_or(normalized.len());
+    format!("{}...", &normalized[..cut])
+}
+
+pub(crate) fn is_provider_auth_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let text = cause.to_string();
+        text.contains("HTTP 401")
+            || text.contains("HTTP 403")
+            || text.contains("Incorrect API key provided")
+            || text.contains("invalid_api_key")
+    })
+}
+
+pub(crate) fn is_reference_like_source(source_text: &str) -> bool {
+    let lower = source_text.to_ascii_lowercase();
+    let comma_count = source_text.matches(',').count();
+    let has_url = lower.contains("http://")
+        || lower.contains("https://")
+        || lower.contains("www.")
+        || lower.contains("doi.org")
+        || lower.contains("doi:");
+    let has_reference_date = lower.contains("january")
+        || lower.contains("february")
+        || lower.contains("march")
+        || lower.contains("april")
+        || lower.contains("may")
+        || lower.contains("june")
+        || lower.contains("july")
+        || lower.contains("august")
+        || lower.contains("september")
+        || lower.contains("october")
+        || lower.contains("november")
+        || lower.contains("december")
+        || source_text.contains('(') && source_text.contains(')');
+    let has_citation_markers = source_text.contains('“')
+        || source_text.contains('”')
+        || source_text.contains('"')
+        || source_text.contains("⟦E");
+    let title_word_count = source_text
+        .split_whitespace()
+        .filter(|word| {
+            let trimmed = word.trim_matches(|ch: char| !ch.is_alphanumeric());
+            trimmed
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_uppercase())
+                .unwrap_or(false)
+        })
+        .count();
+    has_url
+        || (comma_count >= 3 && has_reference_date)
+        || (comma_count >= 2 && has_citation_markers)
+        || (has_reference_date && title_word_count >= 4)
 }
 
 pub(crate) fn split_translation_chunks(source: &str, max_chars: usize) -> Vec<String> {
@@ -1134,8 +1237,14 @@ fn validation_error(reason: ValidationFailureReason, message: &'static str) -> a
     TranslationValidationError { reason, message }.into()
 }
 
-fn validate_cached_translation(source: &str, translated: &str) -> Result<()> {
-    validate_translation_response(source, translated)
+fn validate_cached_translation(source: &str, cached: &CachedTranslation) -> Result<()> {
+    if cached.translated == source
+        && cached.provider == "reference_passthrough"
+        && cached.model == "reference_passthrough"
+    {
+        return Ok(());
+    }
+    validate_translation_response(source, &cached.translated)
         .context("cached translation no longer passes validation")
 }
 

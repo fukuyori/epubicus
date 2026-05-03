@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
@@ -10,10 +14,26 @@ use crate::{
 };
 
 const RUN_LOCK_DIR: &str = "epubicus";
+const RUN_LOCK_RETRY_ATTEMPTS: usize = 5;
+const RUN_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) fn acquire_input_run_lock(input: &Path, purpose: &str) -> Result<FileLock> {
     let path = input_run_lock_path(input)?;
-    FileLock::acquire_nowait(&path, purpose)
+    let mut last_err = None;
+    for attempt in 0..=RUN_LOCK_RETRY_ATTEMPTS {
+        match FileLock::acquire_nowait(&path, purpose) {
+            Ok(lock) => return Ok(lock),
+            Err(err) => {
+                last_err = Some(err);
+                if attempt == RUN_LOCK_RETRY_ATTEMPTS {
+                    break;
+                }
+                let _ = remove_lock_if_stale(&path);
+                thread::sleep(RUN_LOCK_RETRY_INTERVAL);
+            }
+        }
+    }
+    Err(last_err.expect("run lock retry loop must capture the last error"))
 }
 
 pub(crate) fn input_run_lock_path(input: &Path) -> Result<PathBuf> {
@@ -76,7 +96,7 @@ pub(crate) fn unlock_command(args: UnlockArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, sync::mpsc};
 
     #[test]
     fn input_run_lock_rejects_same_epub_without_waiting() -> Result<()> {
@@ -88,6 +108,26 @@ mod tests {
         let err = acquire_input_run_lock(&input, "second").unwrap_err();
 
         assert!(err.to_string().contains("already using this input"));
+        Ok(())
+    }
+
+    #[test]
+    fn input_run_lock_recovers_when_holder_exits_during_retry_window() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("book.epub");
+        fs::write(&input, dir.path().display().to_string())?;
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let input_for_thread = input.clone();
+        let holder = std::thread::spawn(move || -> Result<()> {
+            let _lock = acquire_input_run_lock(&input_for_thread, "holder")?;
+            ready_tx.send(()).ok();
+            thread::sleep(Duration::from_millis(150));
+            Ok(())
+        });
+        ready_rx.recv().expect("holder should acquire lock");
+
+        let _second = acquire_input_run_lock(&input, "second")?;
+        holder.join().expect("holder thread should finish")?;
         Ok(())
     }
 }
