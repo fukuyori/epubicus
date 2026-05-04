@@ -20,7 +20,7 @@ pub(super) fn collect_page_work_items(
     let mut block_index = 0usize;
     loop {
         match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_block_tag(e.name()) => {
+            Event::Start(e) if is_translatable_block_start(&e) => {
                 let end_name = e.name().as_ref().to_vec();
                 let inner = collect_element_inner(&mut reader, &end_name)?;
                 let (source_text, _) = encode_inline(&inner)?;

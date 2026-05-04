@@ -5,6 +5,7 @@ This directory keeps operator-facing guides separate from design notes.
 ## Operator Guides
 
 - [operation-guide.ja.md](operation-guide.ja.md) - Japanese operational guide for normal translation, cache use, recovery, and cleanup.
+- [translation-workflow.ja.md](translation-workflow.ja.md) - Step-by-step Japanese workflow for glossary creation, translation methods, and recovery.
 - [runtime-progress.md](runtime-progress.md) - Runtime notes for release-build scripts, ETA measurement, and inline marker validation.
 - [runtime-progress.ja.md](runtime-progress.ja.md) - Japanese version of the runtime and progress notes.
 - [common-processing.ja.md](common-processing.ja.md) - Japanese map of shared processing paths such as locks, translation, validation, cache, recovery, and batch state handling.

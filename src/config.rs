@@ -428,7 +428,7 @@ pub(crate) struct BatchRunArgs {
     #[arg(long)]
     pub(crate) wait: bool,
     /// Seconds between status polls when --wait is set.
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 180)]
     pub(crate) poll_secs: u64,
     /// Maximum seconds to wait before exiting. Defaults to no limit.
     #[arg(long)]

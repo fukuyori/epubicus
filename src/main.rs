@@ -11,6 +11,7 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     process::ExitCode,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -48,7 +49,8 @@ use config::*;
 #[cfg(test)]
 use epub::local_name;
 use epub::{
-    EpubBook, count_xhtml_blocks, find_nav_item, find_ncx_item, is_block_tag, pack_epub,
+    EpubBook, count_xhtml_blocks, find_nav_item, find_ncx_item, is_translatable_block_start,
+    pack_epub,
     print_toc_entries, read_nav_toc, read_ncx_toc, unpack_epub, update_opf_metadata,
 };
 #[cfg(test)]
@@ -148,6 +150,7 @@ fn run_cli() -> Result<()> {
 }
 
 pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
+    let started = Instant::now();
     let _run_lock = acquire_input_run_lock(&args.input, "translate input EPUB")?;
     let output = args
         .output
@@ -162,6 +165,10 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     if usage_only {
         let report = estimate_usage(&book, range, &translator)?;
         report.print(&translator);
+        eprintln!(
+            "Usage estimate complete: elapsed {}",
+            format_duration_hms(started.elapsed())
+        );
         return Ok(());
     }
     if !partial_from_cache {
@@ -170,6 +177,7 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
             .cache
             .upsert_manifest(&args.input, params, Some(&output))?;
     }
+    translator.cache.begin_manifest_run()?;
     let mut untranslated_report = UntranslatedReport::for_output(
         &args.input,
         &output,
@@ -196,6 +204,10 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     let full_range_translated = stats.pages_translated == book.spine.len() && !partial_from_cache;
     let cache_was_kept_or_partial =
         partial_from_cache || translator.cache.keep_cache || !full_range_translated;
+    let total_elapsed_secs = translator
+        .cache
+        .finish_manifest_run()?
+        .unwrap_or_else(|| started.elapsed().as_secs());
     if pack_succeeded && !cache_was_kept_or_partial {
         translator.cache.finalize_completion()?;
     }
@@ -207,7 +219,7 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
         cache_dir_display.clone()
     };
     eprintln!(
-        "Done. Output: {} | pages translated: {} | blocks translated: {} | provider: {} | model: {} | cache hits: {} | misses: {} | writes: {} | cache: {}",
+        "Done. Output: {} | pages translated: {} | blocks translated: {} | provider: {} | model: {} | cache hits: {} | misses: {} | writes: {} | cache: {} | elapsed: {} | total active: {}",
         output.display(),
         stats.pages_translated,
         stats.blocks_translated,
@@ -217,6 +229,8 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
         translator.cache.stats.misses,
         translator.cache.stats.writes,
         cache_status,
+        format_duration_hms(started.elapsed()),
+        format_duration_hms(Duration::from_secs(total_elapsed_secs)),
     );
     if let Some(summary) = translator.api_usage_summary() {
         eprintln!("API usage: {summary}");
@@ -243,6 +257,7 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
 }
 
 fn test_command(args: TestArgs) -> Result<()> {
+    let started = Instant::now();
     let _run_lock = acquire_input_run_lock(&args.input, "test input EPUB")?;
     let book = unpack_epub(&args.input)?;
     let range = normalize_range(Some(args.from), Some(args.to), book.spine.len())?;
@@ -253,12 +268,18 @@ fn test_command(args: TestArgs) -> Result<()> {
     if usage_only {
         let report = estimate_usage(&book, range, &translator)?;
         report.print(&translator);
+        eprintln!(
+            "Usage estimate complete: elapsed {}",
+            format_duration_hms(started.elapsed())
+        );
         return Ok(());
     }
     let stats = translate_book(&book, range, &mut translator, Mode::Stdout, false, None)?;
     eprintln!(
-        "Translated {} spine pages, {} blocks.",
-        stats.pages_translated, stats.blocks_translated
+        "Translated {} spine pages, {} blocks. elapsed: {}",
+        stats.pages_translated,
+        stats.blocks_translated,
+        format_duration_hms(started.elapsed())
     );
     if let Some(summary) = translator.api_usage_summary() {
         eprintln!("API usage: {summary}");
@@ -345,6 +366,14 @@ fn default_output_path(input: &Path) -> PathBuf {
     input.with_file_name(format!("{stem}.ja.epub"))
 }
 
+fn format_duration_hms(duration: Duration) -> String {
+    let total = duration.as_secs();
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
 fn default_model_for_provider(provider: Provider) -> &'static str {
     match provider {
         Provider::Ollama => DEFAULT_MODEL,
@@ -413,6 +442,7 @@ fn translate_book(
         )
         .with_context(|| format!("failed to translate spine page {page_no}: {}", item.href))?;
         stats.blocks_translated += result;
+        translator.cache.heartbeat_manifest_run()?;
     }
     if let Some(progress) = progress {
         progress.finish(&stats);
@@ -503,7 +533,7 @@ fn estimate_xhtml_usage(
 
     loop {
         match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_block_tag(e.name()) => {
+            Event::Start(e) if is_translatable_block_start(&e) => {
                 let end_name = e.name().as_ref().to_vec();
                 let inner = collect_element_inner(&mut reader, &end_name)?;
                 let (source_text, _) = encode_inline(&inner)?;
@@ -605,7 +635,7 @@ fn count_xhtml_progress_work(
 
     loop {
         match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_block_tag(e.name()) => {
+            Event::Start(e) if is_translatable_block_start(&e) => {
                 let end_name = e.name().as_ref().to_vec();
                 let inner = collect_element_inner(&mut reader, &end_name)?;
                 let (source_text, _) = encode_inline(&inner)?;
@@ -794,7 +824,7 @@ mod tests {
 
     #[test]
     fn aside_is_translatable_block() {
-        assert!(is_block_tag(QName(b"aside")));
+        assert!(crate::epub::is_block_tag(QName(b"aside")));
     }
 
     #[test]

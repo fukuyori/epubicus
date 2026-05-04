@@ -492,7 +492,11 @@ fn remote_batch_response_updates_manifest_ids_and_status() {
         status: "completed".to_string(),
         output_file_id: Some("file_output".to_string()),
         error_file_id: Some("file_error".to_string()),
-        request_counts: Some(OpenAiBatchRequestCounts { failed: Some(3) }),
+        request_counts: Some(OpenAiBatchRequestCounts {
+            total: Some(10),
+            completed: Some(7),
+            failed: Some(3),
+        }),
     };
 
     remote::apply_remote_batch(&mut manifest, &remote);
@@ -552,6 +556,7 @@ fn batch_submit_resume_selects_only_unsubmitted_parts() {
             error_file_id: None,
             output_file: None,
             error_file: None,
+            completed_count: 0,
             failed_count: 0,
         },
         BatchPart {
@@ -566,6 +571,7 @@ fn batch_submit_resume_selects_only_unsubmitted_parts() {
             error_file_id: None,
             output_file: None,
             error_file: None,
+            completed_count: 0,
             failed_count: 0,
         },
     ];
@@ -611,6 +617,7 @@ fn batch_fetch_resume_skips_existing_part_files() -> Result<()> {
             error_file_id: None,
             output_file: None,
             error_file: None,
+            completed_count: 1,
             failed_count: 0,
         },
         BatchPart {
@@ -625,6 +632,7 @@ fn batch_fetch_resume_skips_existing_part_files() -> Result<()> {
             error_file_id: None,
             output_file: None,
             error_file: None,
+            completed_count: 1,
             failed_count: 0,
         },
     ];
@@ -1495,6 +1503,9 @@ fn fixture_manifest() -> BatchManifest {
         completion_window: "24h".to_string(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
+        active_elapsed_secs: 0,
+        current_run_started_at: None,
+        current_run_heartbeat_at: None,
         request_file: REQUESTS_FILE.to_string(),
         work_items_file: WORK_ITEMS_FILE.to_string(),
         request_count: 1,
@@ -1510,6 +1521,7 @@ fn fixture_manifest() -> BatchManifest {
             error_file_id: None,
             output_file: None,
             error_file: None,
+            completed_count: 0,
             failed_count: 0,
         }],
         file_id: None,
@@ -1538,6 +1550,7 @@ fn fixture_part(index: usize, status: &str) -> BatchPart {
         error_file_id: None,
         output_file: None,
         error_file: None,
+        completed_count: 0,
         failed_count: 0,
     }
 }

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -11,6 +12,7 @@ use crate::{
 };
 
 pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
+    let started = Instant::now();
     let log_path = resolve_recovery_log_path(&args)?;
     let records = read_recovery_records(&log_path)?;
     if records.is_empty() {
@@ -61,6 +63,7 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
 
     let cache = CacheStore::from_args(&input, &common)?;
     let mut translator = Translator::new(common, cache)?;
+    translator.cache.begin_manifest_run()?;
     let failed_log = args
         .failed_log
         .clone()
@@ -78,12 +81,14 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
             failed.error = Some("source_hash does not match source_text".to_string());
             print_unrecoverable(&failed);
             unrecoverable.push(failed);
+            translator.cache.heartbeat_manifest_run()?;
             continue;
         }
 
         let replace_existing = record.reason == "inline_restore_failed";
         if !replace_existing && translator.cache.peek(&record.cache_key).is_some() {
             already_cached += 1;
+            translator.cache.heartbeat_manifest_run()?;
             continue;
         }
 
@@ -103,6 +108,7 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
             }
             Err(err) => {
                 if is_provider_auth_error(&err) {
+                    let _ = translator.cache.finish_manifest_run();
                     return Err(err).context(format!(
                         "recovery aborted after provider authentication/configuration failure at p{} b{} {}",
                         record.page_no, record.block_index, record.href
@@ -114,11 +120,16 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
                 unrecoverable.push(failed);
             }
         }
+        translator.cache.heartbeat_manifest_run()?;
     }
 
     if !unrecoverable.is_empty() {
         write_recovery_records(&failed_log, &unrecoverable)?;
     }
+    let total_elapsed_secs = translator
+        .cache
+        .finish_manifest_run()?
+        .unwrap_or_else(|| started.elapsed().as_secs());
 
     println!("Recovery completed");
     println!("input: {}", input.display());
@@ -127,6 +138,11 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
     println!("already cached: {already_cached}");
     println!("recovered: {recovered}");
     println!("unrecoverable: {}", unrecoverable.len());
+    println!(
+        "elapsed: {} | total active: {}",
+        format_duration_hms(started.elapsed()),
+        format_duration_hms(Duration::from_secs(total_elapsed_secs))
+    );
     if !unrecoverable.is_empty() {
         println!("failed log: {}", failed_log.display());
         println!(
@@ -165,6 +181,14 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn format_duration_hms(duration: Duration) -> String {
+    let total = duration.as_secs();
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 fn first_non_empty_path(value: &str) -> Option<PathBuf> {

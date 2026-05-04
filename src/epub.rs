@@ -201,7 +201,7 @@ pub(crate) fn count_xhtml_blocks(path: &Path) -> Result<usize> {
     let mut count = 0usize;
     loop {
         match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_block_tag(e.name()) => count += 1,
+            Event::Start(e) if is_translatable_block_start(&e) => count += 1,
             Event::Eof => break,
             _ => {}
         }
@@ -543,6 +543,18 @@ pub(crate) fn is_block_tag(name: QName<'_>) -> bool {
             | b"th"
             | b"summary"
     )
+}
+
+pub(crate) fn is_translatable_block_start(e: &BytesStart<'_>) -> bool {
+    if is_block_tag(e.name()) {
+        return true;
+    }
+    if local_name(e.name().as_ref()) != b"div" {
+        return false;
+    }
+    e.attributes().with_checks(false).flatten().any(|attr| {
+        local_name(attr.key.as_ref()) == b"id" && attr.value.as_ref().starts_with(b"popup-")
+    })
 }
 
 pub(crate) fn is_never_translate_tag(name: &[u8]) -> bool {

@@ -22,6 +22,7 @@
 #     Invoke-EpubicusOpenAiBatch
 #     Invoke-EpubicusOpenAiBatchStatus
 #     Invoke-EpubicusOpenAiBatchVerify
+#     Invoke-EpubicusOpenAiBatchLocalFallback
 
 param(
     [Parameter(Position = 0)]
@@ -37,7 +38,13 @@ param(
 
     [string[]]$ExtraArgs = @(),
 
-    [int]$PollSecs = 60,
+    [string]$LocalModel = "qwen3:14b",
+
+    [int]$LocalLimit = 100,
+
+    [int]$PollSecs = 180,
+
+    [switch]$NoLocalFallback,
 
     [switch]$NoWait,
 
@@ -65,6 +72,12 @@ if (-not [string]::IsNullOrWhiteSpace($Glossary)) {
     $global:GlossaryPath = (Resolve-Path -LiteralPath $Glossary).Path
 }
 $ExtraArgs = @($ExtraArgs) + @($PassthroughArgs)
+if ([string]::IsNullOrWhiteSpace($global:GlossaryPath) -and ($ExtraArgs -notcontains "--glossary") -and ($ExtraArgs -notcontains "-g") -and -not ($ExtraArgs | Where-Object { $_.StartsWith("--glossary=") })) {
+    $candidateGlossary = Join-Path $inputDir "$inputBaseName.json"
+    if (Test-Path -LiteralPath $candidateGlossary -PathType Leaf) {
+        $global:GlossaryPath = (Resolve-Path -LiteralPath $candidateGlossary).Path
+    }
+}
 
 $env:EPUBICUS_PROVIDER = "openai"
 $env:EPUBICUS_MODEL = $Model
@@ -120,6 +133,8 @@ function Show-EpubicusOpenAiBatchCommands {
     Write-Host "OutputEpub = $global:OutputEpub"
     Write-Host "CacheRoot  = $global:CacheRoot"
     Write-Host "Model      = $env:EPUBICUS_MODEL"
+    Write-Host "LocalModel = $LocalModel"
+    Write-Host "LocalLimit = $LocalLimit"
     if (-not [string]::IsNullOrWhiteSpace($global:GlossaryPath)) {
         Write-Host "Glossary   = $global:GlossaryPath"
     }
@@ -137,10 +152,17 @@ function Show-EpubicusOpenAiBatchCommands {
     Write-Host "Verify:"
     Write-Host "Invoke-EpubicusOpenAiBatchVerify"
     Write-Host ""
+    Write-Host "Local fallback for failed/interrupted Batch work:"
+    Write-Host "Invoke-EpubicusOpenAiBatchLocalFallback"
+    Write-Host ""
 }
 
 function Invoke-EpubicusOpenAiBatch {
     cargo run --release -- batch @(New-EpubicusBatchArgs)
+    if ($LASTEXITCODE -ne 0 -and -not $NoLocalFallback) {
+        Write-Warning "OpenAI Batch command exited with $LASTEXITCODE. Rerouting unfinished work to local Ollama."
+        Invoke-EpubicusOpenAiBatchLocalFallback
+    }
 }
 
 function Invoke-EpubicusOpenAiBatchStatus {
@@ -149,6 +171,23 @@ function Invoke-EpubicusOpenAiBatchStatus {
 
 function Invoke-EpubicusOpenAiBatchVerify {
     cargo run --release -- batch verify @(New-EpubicusBatchCommonArgs)
+}
+
+function Invoke-EpubicusOpenAiBatchLocalFallback {
+    cargo run --release -- batch reroute-local @(New-EpubicusBatchCommonArgs) `
+        --provider openai `
+        --model $env:EPUBICUS_MODEL `
+        --remaining `
+        --priority short-first
+    if ($LASTEXITCODE -ne 0) {
+        return
+    }
+
+    cargo run --release -- batch translate-local @(New-EpubicusBatchCommonArgs) `
+        --provider ollama `
+        --model $LocalModel `
+        --limit $LocalLimit `
+        --priority short-first
 }
 
 Show-EpubicusOpenAiBatchCommands

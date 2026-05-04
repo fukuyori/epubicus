@@ -74,6 +74,12 @@ pub(crate) struct ManifestParams {
 pub(crate) struct ManifestTimestamps {
     pub(crate) started_at: String,
     pub(crate) last_updated_at: String,
+    #[serde(default)]
+    pub(crate) active_elapsed_secs: u64,
+    #[serde(default)]
+    pub(crate) current_run_started_at: Option<String>,
+    #[serde(default)]
+    pub(crate) current_run_heartbeat_at: Option<String>,
 }
 
 pub(crate) struct CacheStore {
@@ -266,11 +272,56 @@ impl CacheStore {
                 timestamps: ManifestTimestamps {
                     started_at: now.clone(),
                     last_updated_at: now,
+                    active_elapsed_secs: 0,
+                    current_run_started_at: None,
+                    current_run_heartbeat_at: None,
                 },
                 last_output_path: last_output_path.map(|p| p.display().to_string()),
             },
         };
         write_manifest(&self.manifest_path, &manifest)
+    }
+
+    pub(crate) fn begin_manifest_run(&self) -> Result<()> {
+        if !self.enabled || !self.manifest_path.exists() {
+            return Ok(());
+        }
+        let _lock = FileLock::acquire(&self.lock_path, "start cache manifest run")?;
+        let mut manifest = read_manifest(&self.manifest_path)?;
+        recover_open_manifest_run(&mut manifest.timestamps);
+        let now = chrono::Utc::now().to_rfc3339();
+        manifest.timestamps.current_run_started_at = Some(now.clone());
+        manifest.timestamps.current_run_heartbeat_at = Some(now.clone());
+        manifest.timestamps.last_updated_at = now;
+        write_manifest(&self.manifest_path, &manifest)
+    }
+
+    pub(crate) fn heartbeat_manifest_run(&self) -> Result<()> {
+        if !self.enabled || !self.manifest_path.exists() {
+            return Ok(());
+        }
+        let _lock = FileLock::acquire(&self.lock_path, "update cache manifest run")?;
+        let mut manifest = read_manifest(&self.manifest_path)?;
+        if manifest.timestamps.current_run_started_at.is_none() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        manifest.timestamps.current_run_heartbeat_at = Some(now.clone());
+        manifest.timestamps.last_updated_at = now;
+        write_manifest(&self.manifest_path, &manifest)
+    }
+
+    pub(crate) fn finish_manifest_run(&self) -> Result<Option<u64>> {
+        if !self.enabled || !self.manifest_path.exists() {
+            return Ok(None);
+        }
+        let _lock = FileLock::acquire(&self.lock_path, "finish cache manifest run")?;
+        let mut manifest = read_manifest(&self.manifest_path)?;
+        finish_open_manifest_run(&mut manifest.timestamps);
+        let total = manifest.timestamps.active_elapsed_secs;
+        manifest.timestamps.last_updated_at = chrono::Utc::now().to_rfc3339();
+        write_manifest(&self.manifest_path, &manifest)?;
+        Ok(Some(total))
     }
 
     /// Delete the cache directory unless --keep-cache was set. Idempotent: does nothing if disabled.
@@ -344,6 +395,51 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
     fs::rename(&tmp, path)
         .with_context(|| format!("failed to commit manifest {}", path.display()))?;
     Ok(())
+}
+
+fn read_manifest(path: &Path) -> Result<Manifest> {
+    let data = fs::read_to_string(path)
+        .with_context(|| format!("failed to read manifest {}", path.display()))?;
+    serde_json::from_str(&data).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn recover_open_manifest_run(timestamps: &mut ManifestTimestamps) {
+    let Some(started_at) = timestamps.current_run_started_at.take() else {
+        timestamps.current_run_heartbeat_at = None;
+        return;
+    };
+    let heartbeat_at = timestamps
+        .current_run_heartbeat_at
+        .take()
+        .unwrap_or_else(|| started_at.clone());
+    timestamps.active_elapsed_secs = timestamps
+        .active_elapsed_secs
+        .saturating_add(elapsed_secs_between(&started_at, &heartbeat_at));
+}
+
+fn finish_open_manifest_run(timestamps: &mut ManifestTimestamps) {
+    let Some(started_at) = timestamps.current_run_started_at.take() else {
+        timestamps.current_run_heartbeat_at = None;
+        return;
+    };
+    let finished_at = chrono::Utc::now().to_rfc3339();
+    timestamps.current_run_heartbeat_at = None;
+    timestamps.active_elapsed_secs = timestamps
+        .active_elapsed_secs
+        .saturating_add(elapsed_secs_between(&started_at, &finished_at));
+}
+
+fn elapsed_secs_between(started_at: &str, finished_at: &str) -> u64 {
+    let Ok(started) = chrono::DateTime::parse_from_rfc3339(started_at) else {
+        return 0;
+    };
+    let Ok(finished) = chrono::DateTime::parse_from_rfc3339(finished_at) else {
+        return 0;
+    };
+    finished
+        .signed_duration_since(started)
+        .num_seconds()
+        .max(0) as u64
 }
 
 fn read_cache_entries(path: &Path) -> Result<HashMap<String, CachedTranslation>> {
@@ -526,6 +622,23 @@ mod tests {
         );
         assert!(!cache.lock_path.starts_with(&cache.dir));
         Ok(())
+    }
+
+    #[test]
+    fn manifest_run_recovery_uses_last_heartbeat() {
+        let mut timestamps = ManifestTimestamps {
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            last_updated_at: "2026-01-01T00:00:00Z".to_string(),
+            active_elapsed_secs: 10,
+            current_run_started_at: Some("2026-01-01T00:00:00Z".to_string()),
+            current_run_heartbeat_at: Some("2026-01-01T00:02:00Z".to_string()),
+        };
+
+        recover_open_manifest_run(&mut timestamps);
+
+        assert_eq!(timestamps.active_elapsed_secs, 130);
+        assert!(timestamps.current_run_started_at.is_none());
+        assert!(timestamps.current_run_heartbeat_at.is_none());
     }
 
     #[test]

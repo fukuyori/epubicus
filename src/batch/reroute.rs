@@ -31,11 +31,15 @@ pub(super) fn batch_reroute_local(args: BatchRerouteLocalArgs) -> Result<()> {
 pub(super) fn batch_translate_local(args: BatchTranslateLocalArgs) -> Result<()> {
     let summary = translate_local_items(args)?;
     println!(
-        "Translated local batch items: {} translated | {} cached | {} failed | {} total | dir: {}",
+        "Translated local batch items: {} translated | {} cached | {} failed | {} total | elapsed {} | total active {} | dir: {}",
         summary.translated_count,
         summary.cached_count,
         summary.failed_count,
         summary.total_count,
+        super::run::format_duration_hms(summary.run_elapsed),
+        super::run::format_duration_hms(Duration::from_secs(
+            summary.total_active_elapsed_secs
+        )),
         summary.batch_dir.display()
     );
     Ok(())
@@ -132,6 +136,7 @@ pub(super) fn reroute_local_items(args: &BatchRerouteLocalArgs) -> Result<Rerout
 }
 
 fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocalSummary> {
+    let run_started = Instant::now();
     if args.common.no_cache {
         bail!("batch translate-local requires cache; remove --no-cache");
     }
@@ -147,6 +152,7 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
 
     let manifest_path = batch_dir.join(BATCH_MANIFEST_FILE);
     let work_items_path = batch_dir.join(WORK_ITEMS_FILE);
+    super::run::begin_batch_manifest_run(&manifest_path)?;
     let mut manifest: BatchManifest = read_json_file(&manifest_path)?;
     let mut work_items: Vec<WorkItem> = read_jsonl_file(&work_items_path)?;
     let total_count = work_items.len();
@@ -264,8 +270,21 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
             &mut manifest,
             &work_items,
         )?;
+        super::run::heartbeat_batch_manifest_run(&manifest_path)?;
         if let Some(message) = abort_error {
-            return Err(crate::recoverable_error(message));
+            let total_active_elapsed_secs = super::run::finish_batch_manifest_run(&manifest_path)?
+                .unwrap_or_else(|| run_started.elapsed().as_secs());
+            return Err(crate::recoverable_error(local_error_summary(
+                &message,
+                run_started.elapsed(),
+                total_active_elapsed_secs,
+                total_count,
+                translated_count,
+                cached_count,
+                failed_count,
+                processed_count,
+                &work_items,
+            )));
         }
         let stall_error = stall_guard.observe(
             translated_count + cached_count,
@@ -292,7 +311,19 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
                 &mut manifest,
                 &work_items,
             )?;
-            return Err(crate::recoverable_error(message));
+            let total_active_elapsed_secs = super::run::finish_batch_manifest_run(&manifest_path)?
+                .unwrap_or_else(|| run_started.elapsed().as_secs());
+            return Err(crate::recoverable_error(local_error_summary(
+                &message,
+                run_started.elapsed(),
+                total_active_elapsed_secs,
+                total_count,
+                translated_count,
+                cached_count,
+                failed_count,
+                processed_count,
+                &work_items,
+            )));
         }
         progress.inc(1);
     }
@@ -305,13 +336,48 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
         cached_count
     ));
 
+    let total_active_elapsed_secs = super::run::finish_batch_manifest_run(&manifest_path)?
+        .unwrap_or_else(|| run_started.elapsed().as_secs());
     Ok(TranslateLocalSummary {
         batch_dir,
         total_count,
         translated_count,
         cached_count,
         failed_count,
+        run_elapsed: run_started.elapsed(),
+        total_active_elapsed_secs,
     })
+}
+
+fn local_error_summary(
+    message: &str,
+    run_elapsed: Duration,
+    total_active_elapsed_secs: u64,
+    total_count: usize,
+    translated_count: usize,
+    cached_count: usize,
+    failed_count: usize,
+    processed_count: usize,
+    work_items: &[WorkItem],
+) -> String {
+    let state_counts = state_counts(work_items);
+    let local_imported = state_counts.get("local_imported").copied().unwrap_or(0);
+    let local_pending = state_counts.get("local_pending").copied().unwrap_or(0);
+    let local_exhausted = state_counts.get("local_exhausted").copied().unwrap_or(0);
+    let submitted = state_counts.get("submitted").copied().unwrap_or(0);
+    format!(
+        "{message}\nBatch local summary: processed {processed_count} this run | translated {translated_count} | cached {cached_count} | errors {failed_count} | total {total_count} | local_imported {local_imported} | local_pending {local_pending} | local_exhausted {local_exhausted} | submitted {submitted} | elapsed {} | total active {}",
+        super::run::format_duration_hms(run_elapsed),
+        super::run::format_duration_hms(Duration::from_secs(total_active_elapsed_secs))
+    )
+}
+
+fn state_counts(work_items: &[WorkItem]) -> BTreeMap<&str, usize> {
+    let mut counts = BTreeMap::new();
+    for item in work_items {
+        *counts.entry(item.state.as_str()).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn local_progress_message(
@@ -628,6 +694,8 @@ struct TranslateLocalSummary {
     translated_count: usize,
     cached_count: usize,
     failed_count: usize,
+    run_elapsed: Duration,
+    total_active_elapsed_secs: u64,
 }
 
 #[cfg(test)]
@@ -674,6 +742,38 @@ mod tests {
             "failed to call OpenAI after 1 attempt(s): OpenAI HTTP 401 Unauthorized: invalid_api_key"
         );
         assert!(should_abort_local_batch_error(&err));
+    }
+
+    #[test]
+    fn local_error_summary_includes_counts_and_elapsed() {
+        let items = vec![
+            test_work_item("local_imported"),
+            test_work_item("local_pending"),
+            test_work_item("local_exhausted"),
+            test_work_item("submitted"),
+        ];
+
+        let summary = local_error_summary(
+            "stopped",
+            Duration::from_secs(65),
+            125,
+            4,
+            1,
+            2,
+            3,
+            6,
+            &items,
+        );
+
+        assert!(summary.contains("stopped"));
+        assert!(summary.contains("processed 6 this run"));
+        assert!(summary.contains("translated 1"));
+        assert!(summary.contains("cached 2"));
+        assert!(summary.contains("errors 3"));
+        assert!(summary.contains("local_pending 1"));
+        assert!(summary.contains("local_exhausted 1"));
+        assert!(summary.contains("elapsed 00:01:05"));
+        assert!(summary.contains("total active 00:02:05"));
     }
 
     #[test]
@@ -746,5 +846,25 @@ mod tests {
         assert!(text.contains(
             "suggested_action=inspect_reference_or_try_another_provider"
         ));
+    }
+
+    fn test_work_item(state: &str) -> WorkItem {
+        WorkItem {
+            custom_id: format!("id-{state}"),
+            cache_key: format!("key-{state}"),
+            page_index: 0,
+            block_index: 0,
+            href: "chapter.xhtml".to_string(),
+            source_text: "source".to_string(),
+            source_hash: "hash".to_string(),
+            prompt_hash: "prompt".to_string(),
+            source_chars: 6,
+            provider: "openai".to_string(),
+            model: DEFAULT_OPENAI_MODEL.to_string(),
+            state: state.to_string(),
+            attempt: 0,
+            last_error: None,
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
     }
 }

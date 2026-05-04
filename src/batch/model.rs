@@ -89,6 +89,12 @@ pub(super) struct BatchManifest {
     pub(super) completion_window: String,
     pub(super) created_at: String,
     pub(super) updated_at: String,
+    #[serde(default)]
+    pub(super) active_elapsed_secs: u64,
+    #[serde(default)]
+    pub(super) current_run_started_at: Option<String>,
+    #[serde(default)]
+    pub(super) current_run_heartbeat_at: Option<String>,
     pub(super) request_file: String,
     pub(super) work_items_file: String,
     pub(super) request_count: usize,
@@ -119,6 +125,8 @@ pub(super) struct BatchPart {
     pub(super) error_file_id: Option<String>,
     pub(super) output_file: Option<String>,
     pub(super) error_file: Option<String>,
+    #[serde(default)]
+    pub(super) completed_count: usize,
     pub(super) failed_count: usize,
 }
 
@@ -185,6 +193,8 @@ pub(super) struct OpenAiBatch {
 
 #[derive(Deserialize)]
 pub(super) struct OpenAiBatchRequestCounts {
+    pub(super) total: Option<usize>,
+    pub(super) completed: Option<usize>,
     pub(super) failed: Option<usize>,
 }
 

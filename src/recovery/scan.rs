@@ -7,7 +7,7 @@ use super::{UntranslatedReport, recover_command};
 use crate::{
     cache::CacheStore,
     config::{RecoverArgs, ScanRecoveryArgs},
-    epub::{SpineItem, is_block_tag, unpack_epub},
+    epub::{SpineItem, is_translatable_block_start, unpack_epub},
     translator::{Translator, validate_translation_response},
     xhtml::{collect_element_inner, encode_inline},
 };
@@ -145,7 +145,7 @@ fn collect_blocks_from_bytes(source: &[u8]) -> Result<Vec<String>> {
     let mut blocks = Vec::new();
     loop {
         match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_block_tag(e.name()) => {
+            Event::Start(e) if is_translatable_block_start(&e) => {
                 let end_name = e.name().as_ref().to_vec();
                 let inner = collect_element_inner(&mut reader, &end_name)?;
                 let (text, _) = encode_inline(&inner)?;
@@ -189,6 +189,16 @@ mod tests {
         )?;
 
         assert_eq!(blocks, vec!["Title", "Hello ⟦E1⟧world⟦/E1⟧."]);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_blocks_collects_fixed_layout_popup_div_text() -> Result<()> {
+        let blocks = collect_blocks_from_bytes(
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><div id="t2" class="t35"><a><div id="popup-t2" class="calibre3">Hello<br/>world.</div></a></div></body></html>"#,
+        )?;
+
+        assert_eq!(blocks, vec!["Hello⟦S1⟧world."]);
         Ok(())
     }
 

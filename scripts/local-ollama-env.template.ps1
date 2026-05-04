@@ -51,6 +51,13 @@ $inputExtension = [System.IO.Path]::GetExtension($global:InputEpub)
 $global:OutputEpub = Join-Path $inputDir "$inputBaseName`_jp$inputExtension"
 $global:CacheRoot = Join-Path $ProjectRoot ".local-ollama-cache"
 $ExtraArgs = @($ExtraArgs) + @($PassthroughArgs)
+$global:GlossaryPath = $null
+if (($ExtraArgs -notcontains "--glossary") -and ($ExtraArgs -notcontains "-g") -and -not ($ExtraArgs | Where-Object { $_.StartsWith("--glossary=") })) {
+    $candidateGlossary = Join-Path $inputDir "$inputBaseName.json"
+    if (Test-Path -LiteralPath $candidateGlossary -PathType Leaf) {
+        $global:GlossaryPath = (Resolve-Path -LiteralPath $candidateGlossary).Path
+    }
+}
 
 # Local provider defaults.
 $env:EPUBICUS_PROVIDER = "ollama"
@@ -84,6 +91,9 @@ function New-EpubicusLocalTranslateArgs {
         "--keep-cache",
         "--output", $global:OutputEpub
     )
+    if (-not [string]::IsNullOrWhiteSpace($global:GlossaryPath)) {
+        $args += @("--glossary", $global:GlossaryPath)
+    }
     if ($PartialFromCache) {
         $args += "--partial-from-cache"
     } else {
@@ -104,6 +114,9 @@ function Show-EpubicusLocalCommands {
     Write-Host "InputEpub  = $global:InputEpub"
     Write-Host "OutputEpub = $global:OutputEpub"
     Write-Host "CacheRoot  = $global:CacheRoot"
+    if (-not [string]::IsNullOrWhiteSpace($global:GlossaryPath)) {
+        Write-Host "Glossary   = $global:GlossaryPath"
+    }
     if ($ExtraArgs.Count -gt 0) {
         Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
     }

@@ -2,6 +2,23 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.4.1 - 2026-05-04
+
+### Added
+
+- Added helper scripts for glossary creation, cache cleanup, cache-based recovery, batch local recovery, and scan-based recovery.
+- Added a Japanese translation workflow guide covering glossary creation, conversion methods, and recovery flows.
+
+### Changed
+
+- Translation helper scripts now auto-use a same-directory, same-basename glossary JSON when one exists beside the input EPUB.
+- OpenAI Batch helper defaults now use a 180-second polling interval.
+- Batch local recovery now continues after verification warnings by default, with `-StrictVerify` available when a hard stop is preferred.
+
+### Fixed
+
+- Fixed fixed-layout EPUB popup text extraction so popup `div` blocks such as `id="popup-..."` are included in inspection, batch preparation, recovery scan, and translation work.
+
 ## 0.4.0 - 2026-05-04
 
 ### Added
@@ -14,6 +31,12 @@ All notable changes to epubicus are documented in this file.
 - `batch translate-local` now saves item state as it progresses, shows completed/error counts in progress output, and records fuller provider error details in `last_error`.
 - Local batch retry now separates reference-like untranslated blocks from prose-like blocks, so reference-style content is quickly moved out of the local retry lane instead of consuming repeated paid retries.
 - Reference passthrough cache entries are now treated as intentional original preservation during `--partial-from-cache` assembly and batch verification.
+- Removed the repo-local Cargo target-dir override so normal `cargo build --release` updates `target/release`.
+- OpenAI Batch `run --wait` now reports poll count, elapsed time, part status counts, remote completed requests, failed requests, and the next poll interval.
+- OpenAI Batch submit now saves the manifest after each uploaded/submitted part, reducing duplicate uploads and remote submissions if a multi-part submit is interrupted.
+- `batch run` now prints total elapsed time when it completes or pauses before fetchable remote output is ready.
+- `translate`, `test`, and usage-estimate runs now print total elapsed time when they finish.
+- Translation and OpenAI Batch runs now persist cumulative active elapsed time in their manifests, so resumed runs can report total active time across interruptions.
 
 ### Fixed
 
@@ -61,8 +84,6 @@ All notable changes to epubicus are documented in this file.
 - Added `scan-recovery` to compare an output EPUB against the original and create recovery logs for suspicious untranslated blocks.
 - Added recovery-log counts and paths to `cache list` and `cache show`, including `recover`-ready log paths.
 - Added `--verbose` / `EPUBICUS_VERBOSE` so retry, fallback, concurrency, and long-block warnings are opt-in.
-- Added repo-local Cargo target configuration so default build and verification artifacts go under `target-runs/default`.
-
 ### Changed
 
 - `--partial-from-cache` now reports recoverable failures when untranslated blocks remain after writing the EPUB and recovery artifacts.

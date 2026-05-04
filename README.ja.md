@@ -7,6 +7,7 @@
 ## ドキュメント
 
 - [docs/README.md](docs/README.md): 運用ガイド、復旧手順、設計メモの索引。
+- [docs/translation-workflow.ja.md](docs/translation-workflow.ja.md): glossary 作成から方式別の翻訳・リカバリーまでの手順書。
 - [docs/operation-guide.ja.md](docs/operation-guide.ja.md): 日本語の運用ガイド。
 - [docs/runtime-progress.ja.md](docs/runtime-progress.ja.md): リリースビルド実行、ETA 計測、インラインマーカー検証の運用メモ。
 - [docs/batch-recovery.ja.md](docs/batch-recovery.ja.md): OpenAI Batch API 実行後の復旧手順。
@@ -18,6 +19,14 @@
 ```powershell
 cargo run -- inspect .\book.epub
 cargo run -- toc .\book.epub
+```
+
+release 実行ファイルを直接使う場合は、先に通常の
+`target\release\epubicus.exe` を更新してください。
+
+```powershell
+.\scripts\build-release.ps1
+.\target\release\epubicus.exe glossary .\book.epub --review-prompt .\glossary-review.md
 ```
 
 指定範囲を標準出力に翻訳するテスト:

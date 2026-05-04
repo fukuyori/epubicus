@@ -54,6 +54,13 @@ $inputExtension = [System.IO.Path]::GetExtension($global:InputEpub)
 $global:OutputEpub = Join-Path $inputDir "$inputBaseName`_jp$inputExtension"
 $global:CacheRoot = Join-Path $ProjectRoot ".openai-cache"
 $ExtraArgs = @($ExtraArgs) + @($PassthroughArgs)
+$global:GlossaryPath = $null
+if (($ExtraArgs -notcontains "--glossary") -and ($ExtraArgs -notcontains "-g") -and -not ($ExtraArgs | Where-Object { $_.StartsWith("--glossary=") })) {
+    $candidateGlossary = Join-Path $inputDir "$inputBaseName.json"
+    if (Test-Path -LiteralPath $candidateGlossary -PathType Leaf) {
+        $global:GlossaryPath = (Resolve-Path -LiteralPath $candidateGlossary).Path
+    }
+}
 
 $env:EPUBICUS_PROVIDER = "openai"
 $env:EPUBICUS_MODEL = $Model
@@ -79,6 +86,9 @@ function New-EpubicusOpenAiArgs {
         "--keep-cache",
         "--output", $global:OutputEpub
     )
+    if (-not [string]::IsNullOrWhiteSpace($global:GlossaryPath)) {
+        $args += @("--glossary", $global:GlossaryPath)
+    }
     if ($From -gt 0) {
         $args += @("--from", "$From")
     }
@@ -98,6 +108,9 @@ function Show-EpubicusOpenAiCommands {
     Write-Host "OutputEpub = $global:OutputEpub"
     Write-Host "CacheRoot  = $global:CacheRoot"
     Write-Host "Model      = $env:EPUBICUS_MODEL"
+    if (-not [string]::IsNullOrWhiteSpace($global:GlossaryPath)) {
+        Write-Host "Glossary   = $global:GlossaryPath"
+    }
     if ($ExtraArgs.Count -gt 0) {
         Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
     }

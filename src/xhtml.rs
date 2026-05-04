@@ -12,7 +12,8 @@ use quick_xml::{
 };
 
 use crate::{
-    Mode, Translator, epub::is_block_tag, progress::ProgressReporter, recovery::UntranslatedReport,
+    Mode, Translator, epub::is_translatable_block_start, progress::ProgressReporter,
+    recovery::UntranslatedReport,
     translator::Translation,
 };
 
@@ -64,7 +65,7 @@ pub(crate) fn translate_xhtml_file(
 
     loop {
         match reader.read_event_into(&mut buf)? {
-            Event::Start(e) if is_block_tag(e.name()) => {
+            Event::Start(e) if is_translatable_block_start(&e) => {
                 let start = e.into_owned();
                 let end_name = start.name().as_ref().to_vec();
                 let inner = collect_element_inner(&mut reader, &end_name)?;

@@ -32,7 +32,7 @@ use crate::{
         BatchStatusArgs, BatchSubmitArgs, BatchTranslateLocalArgs, BatchVerifyArgs, CommonArgs,
         DEFAULT_CLAUDE_MODEL, DEFAULT_MODEL, DEFAULT_OPENAI_MODEL, Provider, TranslateArgs,
     },
-    epub::{EpubBook, is_block_tag, unpack_epub},
+    epub::{EpubBook, is_translatable_block_start, unpack_epub},
     glossary::{GlossaryEntry, load_glossary},
     input_lock::acquire_input_run_lock,
     lock::FileLock,

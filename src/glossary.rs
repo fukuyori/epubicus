@@ -24,9 +24,11 @@ struct GlossaryFile {
 pub(crate) struct GlossaryEntry {
     pub(crate) src: String,
     pub(crate) dst: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     pub(crate) kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     pub(crate) note: Option<String>,
 }
 
@@ -338,6 +340,30 @@ mod tests {
         assert_eq!(glossary.entries[0].dst, "ホライゾン");
         assert_eq!(glossary.entries[0].kind.as_deref(), Some("term"));
         assert_eq!(glossary.entries[0].note.as_deref(), Some("old note"));
+    }
+
+    #[test]
+    fn legacy_kind_and_note_are_not_reemitted() {
+        let glossary: GlossaryFile = serde_json::from_str(
+            r#"{
+  "source_lang": "en",
+  "target_lang": "ja",
+  "entries": [
+    {
+      "src": "Horizon",
+      "dst": "ホライゾン",
+      "kind": "term",
+      "note": "old note"
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string_pretty(&glossary).unwrap();
+
+        assert!(!json.contains("\"kind\""));
+        assert!(!json.contains("\"note\""));
     }
 
     #[test]

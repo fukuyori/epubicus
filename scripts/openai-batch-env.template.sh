@@ -17,7 +17,7 @@ INPUT_PATH=""
 FROM="0"
 TO="0"
 MODEL="gpt-5-mini"
-POLL_SECS="60"
+POLL_SECS="180"
 NO_WAIT="0"
 NO_RUN="0"
 
@@ -47,6 +47,15 @@ if [ "$INPUT_BASE" = "$INPUT_FILE" ]; then OUTPUT_FILE="${INPUT_FILE}_jp"; else 
 export InputEpub="$INPUT_DIR/$INPUT_FILE"
 export OutputEpub="$INPUT_DIR/$OUTPUT_FILE"
 export CacheRoot="$PROJECT_ROOT/.batch-openai-cache"
+AutoGlossary=""
+case " $* " in
+    *" --glossary "*|*" --glossary="*|*" -g "*) ;;
+    *)
+        if [ -f "$INPUT_DIR/$INPUT_BASE.json" ]; then
+            AutoGlossary="$INPUT_DIR/$INPUT_BASE.json"
+        fi
+        ;;
+esac
 export EPUBICUS_PROVIDER="openai"
 export EPUBICUS_MODEL="$MODEL"
 export EPUBICUS_OPENAI_BASE_URL="https://api.openai.com/v1"
@@ -64,6 +73,7 @@ fi
 
 invoke_epubicus_openai_batch() {
     set -- run "$InputEpub" --provider openai --model "$EPUBICUS_MODEL" --cache-root "$CacheRoot" --force-prepare --poll-secs "$POLL_SECS" --output "$OutputEpub" "$@"
+    if [ -n "$AutoGlossary" ]; then set -- "$@" --glossary "$AutoGlossary"; fi
     if [ "$NO_WAIT" = "0" ]; then set -- "$@" --wait; fi
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
     if [ "$TO" -gt 0 ]; then set -- "$@" --to "$TO"; fi
@@ -83,6 +93,9 @@ echo "InputEpub  = $InputEpub"
 echo "OutputEpub = $OutputEpub"
 echo "CacheRoot  = $CacheRoot"
 echo "Model      = $EPUBICUS_MODEL"
+if [ -n "$AutoGlossary" ]; then
+    echo "Glossary   = $AutoGlossary"
+fi
 if [ "$#" -gt 0 ]; then
     echo "ExtraArgs  = $*"
 fi

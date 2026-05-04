@@ -32,12 +32,13 @@ pub(super) fn batch_submit(args: BatchSubmitArgs) -> Result<()> {
     let endpoint = manifest.endpoint.clone();
     let completion_window = manifest.completion_window.clone();
     for part_index in submit_indices {
-        let part = manifest
+        let part_pos = manifest
             .parts
-            .iter_mut()
-            .find(|part| part.index == part_index)
+            .iter()
+            .position(|part| part.index == part_index)
             .with_context(|| format!("batch manifest is missing part {part_index}"))?;
-        if part.batch_id.is_some() && args.force {
+        if manifest.parts[part_pos].batch_id.is_some() && args.force {
+            let part = &mut manifest.parts[part_pos];
             part.file_id = None;
             part.batch_id = None;
             part.status = "prepared".to_string();
@@ -45,30 +46,45 @@ pub(super) fn batch_submit(args: BatchSubmitArgs) -> Result<()> {
             part.error_file_id = None;
             part.output_file = None;
             part.error_file = None;
+            part.completed_count = 0;
             part.failed_count = 0;
         }
-        let requests_path = batch_dir.join(&part.request_file);
+        let request_file = manifest.parts[part_pos].request_file.clone();
+        let requests_path = batch_dir.join(&request_file);
         if !requests_path.exists() {
             bail!("requests file does not exist: {}", requests_path.display());
         }
-        let file = upload_batch_file(
-            &client,
-            &args.common.openai_base_url,
-            &api_key,
-            &requests_path,
-        )
-        .with_context(|| format!("failed to upload batch part {}", part.index))?;
+        let file_id = if let Some(file_id) = manifest.parts[part_pos].file_id.clone() {
+            file_id
+        } else {
+            let file = upload_batch_file(
+                &client,
+                &args.common.openai_base_url,
+                &api_key,
+                &requests_path,
+            )
+            .with_context(|| format!("failed to upload batch part {part_index}"))?;
+            manifest.parts[part_pos].file_id = Some(file.id.clone());
+            sync_manifest_from_parts(&mut manifest);
+            manifest.updated_at = chrono::Utc::now().to_rfc3339();
+            write_json_pretty_atomic(&manifest_path, &manifest)?;
+            file.id
+        };
         let remote = create_openai_batch(
             &client,
             &args.common.openai_base_url,
             &api_key,
             &endpoint,
             &completion_window,
-            &file.id,
+            &file_id,
         )
-        .with_context(|| format!("failed to create batch part {}", part.index))?;
+        .with_context(|| format!("failed to create batch part {part_index}"))?;
+        let part = &mut manifest.parts[part_pos];
         apply_remote_batch_to_part(part, &remote);
-        part.file_id = Some(file.id);
+        part.file_id = Some(file_id);
+        sync_manifest_from_parts(&mut manifest);
+        manifest.updated_at = chrono::Utc::now().to_rfc3339();
+        write_json_pretty_atomic(&manifest_path, &manifest)?;
     }
     sync_manifest_from_parts(&mut manifest);
     manifest.updated_at = chrono::Utc::now().to_rfc3339();
@@ -356,8 +372,9 @@ fn print_remote_status(manifest: &BatchManifest) {
         manifest.file_id.as_deref().unwrap_or("(missing)")
     );
     println!(
-        "requests: {} | imported: {} | rejected: {} | failed: {}",
+        "requests: {} | remote completed: {} | imported: {} | rejected: {} | failed: {}",
         manifest.request_count,
+        remote_completed_requests(manifest),
         manifest.imported_count,
         manifest.rejected_count,
         manifest.failed_count
@@ -380,6 +397,27 @@ fn print_remote_status(manifest: &BatchManifest) {
             );
         }
     }
+}
+
+fn remote_completed_requests(manifest: &BatchManifest) -> usize {
+    if manifest.parts.is_empty() {
+        return if manifest.status == "completed" {
+            manifest.request_count
+        } else {
+            0
+        };
+    }
+    manifest
+        .parts
+        .iter()
+        .map(|part| {
+            if part.completed_count > 0 || part.status != "completed" {
+                part.completed_count
+            } else {
+                part.request_count
+            }
+        })
+        .sum()
 }
 
 fn openai_client(common: &CommonArgs) -> Result<Client> {
@@ -598,6 +636,13 @@ fn apply_remote_batch_to_part(part: &mut BatchPart, remote: &OpenAiBatch) {
         part.error_file_id = Some(error_file_id.clone());
     }
     if let Some(counts) = &remote.request_counts {
+        part.completed_count = counts.completed.unwrap_or_else(|| {
+            if remote.status == "completed" {
+                counts.total.unwrap_or(part.request_count)
+            } else {
+                part.completed_count
+            }
+        });
         part.failed_count = counts.failed.unwrap_or(part.failed_count);
     }
 }
@@ -618,6 +663,7 @@ fn ensure_manifest_parts(manifest: &mut BatchManifest) {
         error_file_id: manifest.error_file_id.clone(),
         output_file: manifest.output_file.clone(),
         error_file: manifest.error_file.clone(),
+        completed_count: 0,
         failed_count: manifest.failed_count,
     });
 }

@@ -7,6 +7,7 @@ It currently supports local Ollama, OpenAI, and Claude providers.
 ## Documentation
 
 - [docs/README.md](docs/README.md) maps the operator guides, recovery notes, and design documents.
+- [docs/translation-workflow.ja.md](docs/translation-workflow.ja.md) is a Japanese step-by-step workflow for glossary creation, translation methods, and recovery.
 - [docs/runtime-progress.md](docs/runtime-progress.md) explains release-build script execution, ETA measurement, and inline marker validation.
 - [docs/batch-recovery.md](docs/batch-recovery.md) is the detailed checklist for Batch API recovery.
 - [docs/operation-guide.ja.md](docs/operation-guide.ja.md) is the Japanese operator guide.
@@ -18,6 +19,14 @@ Inspect the EPUB first. `FROM` and `TO` in translation commands are 1-based OPF 
 ```powershell
 cargo run -- inspect .\book.epub
 cargo run -- toc .\book.epub
+```
+
+If you run the release executable directly, refresh the conventional
+`target\release\epubicus.exe` first:
+
+```powershell
+.\scripts\build-release.ps1
+.\target\release\epubicus.exe glossary .\book.epub --review-prompt .\glossary-review.md
 ```
 
 Translate a small range to stdout:
@@ -328,7 +337,7 @@ One-command Batch API flow:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-cargo run -- batch run .\book.epub --provider openai --model gpt-5-mini --wait --poll-secs 60 --output .\book.ja.epub
+cargo run -- batch run .\book.epub --provider openai --model gpt-5-mini --wait --poll-secs 180 --output .\book.ja.epub
 ```
 
 The same command is resume-friendly. If it exits while the remote status is

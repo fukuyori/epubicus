@@ -78,6 +78,15 @@ fi
 export InputEpub="$INPUT_DIR/$INPUT_FILE"
 export OutputEpub="$INPUT_DIR/$OUTPUT_FILE"
 export CacheRoot="$PROJECT_ROOT/.local-ollama-cache"
+AutoGlossary=""
+case " $* " in
+    *" --glossary "*|*" --glossary="*|*" -g "*) ;;
+    *)
+        if [ -f "$INPUT_DIR/$INPUT_BASE.json" ]; then
+            AutoGlossary="$INPUT_DIR/$INPUT_BASE.json"
+        fi
+        ;;
+esac
 
 export EPUBICUS_PROVIDER="ollama"
 export EPUBICUS_MODEL="qwen3:14b"
@@ -96,6 +105,9 @@ show_epubicus_local_commands() {
     echo "InputEpub  = $InputEpub"
     echo "OutputEpub = $OutputEpub"
     echo "CacheRoot  = $CacheRoot"
+    if [ -n "$AutoGlossary" ]; then
+        echo "Glossary   = $AutoGlossary"
+    fi
     if [ "$#" -gt 0 ]; then
         echo "ExtraArgs  = $*"
     fi
@@ -115,6 +127,7 @@ show_epubicus_local_commands() {
 }
 
 invoke_epubicus_local_page_check() {
+    if [ -n "$AutoGlossary" ]; then set -- "$@" --glossary "$AutoGlossary"; fi
     cargo run --release -- translate "$InputEpub" \
         --cache-root "$CacheRoot" \
         --from "$FROM" \
@@ -126,6 +139,7 @@ invoke_epubicus_local_page_check() {
 }
 
 invoke_epubicus_local_full() {
+    if [ -n "$AutoGlossary" ]; then set -- "$@" --glossary "$AutoGlossary"; fi
     cargo run --release -- translate "$InputEpub" \
         --cache-root "$CacheRoot" \
         --keep-cache \
@@ -135,6 +149,7 @@ invoke_epubicus_local_full() {
 }
 
 invoke_epubicus_assemble_from_cache() {
+    if [ -n "$AutoGlossary" ]; then set -- "$@" --glossary "$AutoGlossary"; fi
     cargo run --release -- translate "$InputEpub" \
         --cache-root "$CacheRoot" \
         --partial-from-cache \
