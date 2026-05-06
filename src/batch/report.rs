@@ -176,10 +176,7 @@ fn print_batch_health(health: &BatchHealth) {
             health.cache_backed_pending_items
         );
     }
-    println!(
-        "effective remaining: {}",
-        health.effective_remaining_items
-    );
+    println!("effective remaining: {}", health.effective_remaining_items);
     println!("rejected lines: {}", health.rejected_file_count);
     println!("error lines: {}", health.error_file_count);
     if let Some(report) = &health.import_report {
@@ -348,8 +345,10 @@ pub(super) fn collect_batch_verify(args: &BatchVerifyArgs) -> Result<BatchVerify
         }
 
         let cached = cache.peek(&item.cache_key);
-        let cache_backed_state =
-            matches!(item.state.as_str(), "imported" | "local_imported" | "skipped");
+        let cache_backed_state = matches!(
+            item.state.as_str(),
+            "imported" | "local_imported" | "skipped"
+        );
         if cache_backed_state && cached.is_none() {
             cache_conflict.push(VerifyFinding::from_work_item(
                 item,

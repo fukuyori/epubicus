@@ -111,6 +111,7 @@ fn append_reason_specific_retry_instruction(prompt: &mut String, source: &str, r
         }
         "unchanged_source" | "untranslated_text" | "untranslated_segment" => {
             prompt.push_str("\nProper nouns, URLs, numbers, symbols, file paths, and code-like identifiers may remain unchanged when appropriate. Translate the surrounding prose/body text into Japanese.\n");
+            prompt.push_str("If the source is a title, heading, caption, or short phrase, still translate it into natural Japanese. Do not return the source text unchanged unless it is only a URL, DOI, ISBN, number, symbol, code, or identifier.\n");
         }
         "truncated" => {
             prompt.push_str("\nDo not omit, summarize, or stop early. Translate through the end of the source text.\n");

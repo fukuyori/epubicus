@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     cache::{CacheRecord, CacheStore, CachedTranslation, ManifestParams, glossary_sha},
-    config::{ANTHROPIC_VERSION, CommonArgs, Provider},
+    config::{ANTHROPIC_VERSION, CommonArgs, DEFAULT_DEEPSEEK_BASE_URL, Provider},
     default_model_for_provider,
     glossary::{GlossaryEntry, load_glossary},
     progress::ProgressReporter,
@@ -32,6 +32,7 @@ use crate::{
 
 pub(crate) const ADAPTIVE_CONCURRENCY_SUCCESS_THRESHOLD: usize = 20;
 pub(crate) const PROMPT_VERSION: &str = "v2";
+type RetryObserver = Arc<dyn Fn(usize) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValidationFailureReason {
@@ -81,17 +82,22 @@ pub(crate) struct TranslationBackend {
     ollama_host: String,
     openai_base_url: String,
     claude_base_url: String,
+    deepseek_base_url: String,
     openai_api_key: Option<String>,
     anthropic_api_key: Option<String>,
+    deepseek_api_key: Option<String>,
     temperature: f32,
     num_ctx: u32,
-    retries: u32,
+    request_retries: u32,
+    validation_retries: u32,
     pub(crate) max_chars_per_request: usize,
     pub(crate) style: String,
     pub(crate) glossary: Vec<GlossaryEntry>,
     client: Client,
     api_usage: Arc<Mutex<ApiUsage>>,
     adaptive_concurrency: Arc<AdaptiveConcurrency>,
+    retry_count: Arc<AtomicUsize>,
+    retry_observer: Option<RetryObserver>,
     verbose: bool,
 }
 
@@ -184,8 +190,14 @@ pub(crate) struct Translator {
 }
 
 pub(crate) enum Translation {
-    Translated { text: String, from_cache: bool },
-    Original { provider_attempted: bool },
+    Translated {
+        text: String,
+        from_cache: bool,
+    },
+    Original {
+        provider_attempted: bool,
+        reason: &'static str,
+    },
 }
 
 #[derive(Clone)]
@@ -241,6 +253,17 @@ impl Translator {
                 args.prompt_api_key,
             )?
         };
+        let deepseek_api_key = if args.usage_only {
+            None
+        } else {
+            read_api_key(
+                provider,
+                Provider::Deepseek,
+                None,
+                "DEEPSEEK_API_KEY",
+                args.prompt_api_key,
+            )?
+        };
         let glossary = match &args.glossary {
             Some(path) => load_glossary(path)?,
             None => Vec::new(),
@@ -250,9 +273,11 @@ impl Translator {
         let api_usage = Arc::new(Mutex::new(ApiUsage::default()));
         let adaptive_concurrency =
             Arc::new(AdaptiveConcurrency::with_verbose(concurrency, verbose));
+        let retry_count = Arc::new(AtomicUsize::new(0));
         let ollama_host = args.ollama_host.trim_end_matches('/').to_string();
         let openai_base_url = args.openai_base_url.trim_end_matches('/').to_string();
         let claude_base_url = args.claude_base_url.trim_end_matches('/').to_string();
+        let deepseek_base_url = DEFAULT_DEEPSEEK_BASE_URL.to_string();
         let fallback_backend = if let Some(provider) = fallback_provider {
             let fallback_model = args
                 .fallback_model
@@ -280,23 +305,39 @@ impl Translator {
                     args.prompt_api_key,
                 )?
             };
+            let fallback_deepseek_api_key = if args.usage_only {
+                None
+            } else {
+                read_api_key(
+                    provider,
+                    Provider::Deepseek,
+                    None,
+                    "DEEPSEEK_API_KEY",
+                    args.prompt_api_key,
+                )?
+            };
             Some(TranslationBackend {
                 provider,
                 model: fallback_model,
                 ollama_host: ollama_host.clone(),
                 openai_base_url: openai_base_url.clone(),
                 claude_base_url: claude_base_url.clone(),
+                deepseek_base_url: deepseek_base_url.clone(),
                 openai_api_key: fallback_openai_api_key,
                 anthropic_api_key: fallback_anthropic_api_key,
+                deepseek_api_key: fallback_deepseek_api_key,
                 temperature: args.temperature,
                 num_ctx: args.num_ctx,
-                retries: args.retries,
+                request_retries: args.retries,
+                validation_retries: args.validation_retries,
                 max_chars_per_request: args.max_chars_per_request,
                 style: args.style.clone(),
                 glossary: glossary.clone(),
                 client: client.clone(),
                 api_usage: api_usage.clone(),
                 adaptive_concurrency: adaptive_concurrency.clone(),
+                retry_count: retry_count.clone(),
+                retry_observer: None,
                 verbose,
             })
         } else {
@@ -309,17 +350,22 @@ impl Translator {
                 ollama_host,
                 openai_base_url,
                 claude_base_url,
+                deepseek_base_url,
                 openai_api_key,
                 anthropic_api_key,
+                deepseek_api_key,
                 temperature: args.temperature,
                 num_ctx: args.num_ctx,
-                retries: args.retries,
+                request_retries: args.retries,
+                validation_retries: args.validation_retries,
                 max_chars_per_request: args.max_chars_per_request,
                 style: args.style,
                 glossary,
                 client,
                 api_usage,
                 adaptive_concurrency,
+                retry_count,
+                retry_observer: None,
                 verbose,
             },
             fallback_backend,
@@ -331,6 +377,25 @@ impl Translator {
             passthrough_on_validation_failure: args.passthrough_on_validation_failure,
             verbose,
         })
+    }
+
+    pub(crate) fn retry_count(&self) -> usize {
+        self.backend.retry_count.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_retry_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        let observer: RetryObserver = Arc::new(observer);
+        self.backend.retry_observer = Some(observer.clone());
+        if let Some(fallback) = self.fallback_backend.as_mut() {
+            fallback.retry_observer = Some(observer);
+        }
+    }
+
+    pub(crate) fn verbose(&self) -> bool {
+        self.verbose
     }
 
     pub(crate) fn translate_many(
@@ -379,6 +444,7 @@ impl Translator {
                 } else {
                     translations[result.index] = Some(Translation::Original {
                         provider_attempted: true,
+                        reason: "validation_passthrough",
                     });
                 }
                 Ok(())
@@ -415,6 +481,22 @@ impl Translator {
         }
         let glossary_subset = self.backend.glossary_subset(source);
         let key = self.cache_key(source, &glossary_subset);
+        let glossary_translation = deterministic_glossary_translation(source, &glossary_subset);
+        if let Some(translated) = glossary_translation.clone() {
+            let replace_existing = self.cache.peek_record(&key).is_some();
+            self.insert_cache_translation(
+                key.clone(),
+                translated.clone(),
+                self.backend.provider,
+                self.backend.model.clone(),
+                replace_existing,
+            )?;
+            return Ok(Some(Translation::Translated {
+                text: translated,
+                from_cache: false,
+            }));
+        }
+        let mut original_reason = "cache_miss";
         if let Some(cached) = self.cache.get_record(&key) {
             match validate_cached_translation(source, &cached) {
                 Ok(()) => {
@@ -424,11 +506,31 @@ impl Translator {
                     }));
                 }
                 Err(err) => {
+                    if let Some(translated) = glossary_translation.clone() {
+                        self.insert_cache_translation(
+                            key.clone(),
+                            translated.clone(),
+                            self.backend.provider,
+                            self.backend.model.clone(),
+                            true,
+                        )?;
+                        return Ok(Some(Translation::Translated {
+                            text: translated,
+                            from_cache: false,
+                        }));
+                    }
+                    if is_structural_passthrough_source(source) {
+                        return Ok(Some(Translation::Translated {
+                            text: source.to_string(),
+                            from_cache: true,
+                        }));
+                    }
                     if self.verbose {
                         eprintln!(
                             "warning: ignoring invalid cached translation for key {key}: {err}"
                         );
                     }
+                    original_reason = "invalid_cached_translation";
                     self.cache.invalidate(&key);
                 }
             }
@@ -436,6 +538,7 @@ impl Translator {
         if self.partial_from_cache {
             return Ok(Some(Translation::Original {
                 provider_attempted: false,
+                reason: original_reason,
             }));
         }
         jobs.push(TranslationJob {
@@ -498,6 +601,14 @@ impl Translator {
             ));
         }
         let glossary_subset = self.backend.glossary_subset(source);
+        if let Some(translated) = deterministic_glossary_translation(source, &glossary_subset) {
+            return Ok((
+                translated,
+                self.backend.provider,
+                self.backend.model.clone(),
+                false,
+            ));
+        }
         let job = TranslationJob {
             index: 0,
             source: source.to_string(),
@@ -526,16 +637,18 @@ impl Translator {
         model: String,
         replace_existing: bool,
     ) -> Result<()> {
-        if replace_existing {
-            self.cache.invalidate(&key);
-        }
-        self.cache.insert(CacheRecord {
+        let record = CacheRecord {
             key,
             translated,
             provider: provider.to_string(),
             model,
             at: chrono::Utc::now().to_rfc3339(),
-        })
+        };
+        if replace_existing {
+            self.cache.replace(record)
+        } else {
+            self.cache.insert(record)
+        }
     }
 }
 
@@ -751,6 +864,13 @@ fn dispatch_translation_jobs(
 }
 
 impl TranslationBackend {
+    fn record_retry(&self) {
+        let total = self.retry_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(observer) = &self.retry_observer {
+            observer(total);
+        }
+    }
+
     fn current_concurrency(&self) -> usize {
         self.adaptive_concurrency.current()
     }
@@ -824,21 +944,41 @@ impl TranslationBackend {
         glossary_subset: &[GlossaryEntry],
     ) -> Result<String> {
         let mut prompt = initial_prompt;
-        let attempts = self.retries.saturating_add(1).max(1);
+        let attempts = self.validation_retries.saturating_add(1).max(1);
         for attempt in 1..=attempts {
             let translated = match self.provider {
                 Provider::Ollama => self.translate_ollama(&prompt),
                 Provider::Openai => self.translate_openai(&prompt),
                 Provider::Claude => self.translate_claude(&prompt),
+                Provider::Deepseek => self.translate_deepseek(&prompt),
             }?;
             match validate_translation_response(source, &translated) {
                 Ok(()) => return Ok(translated),
                 Err(err) if attempt < attempts => {
+                    if validation_failure_reason(&err)
+                        == Some(ValidationFailureReason::MissingPlaceholder)
+                    {
+                        self.record_retry();
+                        match self
+                            .translate_preserving_placeholder_segments(source, glossary_subset)
+                        {
+                            Ok(recovered) => return Ok(recovered),
+                            Err(segment_err) => {
+                                if self.verbose {
+                                    eprintln!(
+                                        "warning: placeholder-preserving recovery failed: {segment_err}; falling back to validation retry"
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        self.record_retry();
+                    }
                     let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
                     if self.verbose {
                         eprintln!(
                             "warning: translation validation failed: {err}; retry {attempt}/{} in {wait_secs}s",
-                            self.retries
+                            self.validation_retries
                         );
                     }
                     let reason =
@@ -860,6 +1000,82 @@ impl TranslationBackend {
             }
         }
         bail!("translation validation failed")
+    }
+
+    fn translate_preserving_placeholder_segments(
+        &self,
+        source: &str,
+        glossary_subset: &[GlossaryEntry],
+    ) -> Result<String> {
+        let mut output = String::new();
+        let mut translated_any_segment = false;
+        for token in tokenize_placeholders(source) {
+            match token {
+                Token::Text(text) => {
+                    let translated =
+                        self.translate_placeholder_text_segment(text.as_str(), glossary_subset)?;
+                    if normalize_for_comparison(&translated) != normalize_for_comparison(&text) {
+                        translated_any_segment = true;
+                    }
+                    output.push_str(&translated);
+                }
+                Token::Open(id) => output.push_str(&format!("⟦E{id}⟧")),
+                Token::Close(id) => output.push_str(&format!("⟦/E{id}⟧")),
+                Token::SelfClose(id) => output.push_str(&format!("⟦S{id}⟧")),
+            }
+        }
+        if !translated_any_segment {
+            bail!("placeholder-preserving recovery did not translate any text segment");
+        }
+        validate_translation_response(source, &output)?;
+        Ok(output)
+    }
+
+    fn translate_placeholder_text_segment(
+        &self,
+        text: &str,
+        glossary_subset: &[GlossaryEntry],
+    ) -> Result<String> {
+        if !is_meaningful_english(text) {
+            return Ok(text.to_string());
+        }
+        let leading_len = text
+            .char_indices()
+            .find(|(_, ch)| !ch.is_whitespace())
+            .map(|(idx, _)| idx)
+            .unwrap_or(text.len());
+        let trailing_start = text
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| !ch.is_whitespace())
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(leading_len);
+        let leading = &text[..leading_len];
+        let core = &text[leading_len..trailing_start];
+        let trailing = &text[trailing_start..];
+        if core.trim().is_empty() {
+            return Ok(text.to_string());
+        }
+        let segment_glossary = self.glossary_subset(core);
+        let segment_glossary = if segment_glossary.is_empty() {
+            glossary_subset.to_vec()
+        } else {
+            segment_glossary
+        };
+        let translated =
+            self.translate_once_with_validation(core, user_prompt(core, &segment_glossary))?;
+        Ok(format!("{leading}{}{trailing}", translated.trim()))
+    }
+
+    fn translate_once_with_validation(&self, source: &str, prompt: String) -> Result<String> {
+        let translated = match self.provider {
+            Provider::Ollama => self.translate_ollama(&prompt),
+            Provider::Openai => self.translate_openai(&prompt),
+            Provider::Claude => self.translate_claude(&prompt),
+            Provider::Deepseek => self.translate_deepseek(&prompt),
+        }?;
+        validate_translation_response(source, &translated)?;
+        Ok(translated)
     }
 
     fn cache_key(&self, source: &str, glossary_subset: &[GlossaryEntry]) -> String {
@@ -960,22 +1176,60 @@ impl TranslationBackend {
         Ok(text.trim().to_string())
     }
 
+    fn translate_deepseek(&self, user_prompt: &str) -> Result<String> {
+        let api_key = self
+            .deepseek_api_key
+            .as_deref()
+            .context("DeepSeek provider requires DEEPSEEK_API_KEY or --prompt-api-key")?;
+        let payload = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 2048,
+            "temperature": self.temperature,
+            "thinking": {"type": "disabled"},
+            "system": system_prompt(&self.style),
+            "messages": [
+                {"role": "user", "content": user_prompt}
+            ]
+        });
+        let response: ClaudeResponse = self.request_json_with_retry("DeepSeek", || {
+            self.client
+                .post(format!("{}/messages", self.deepseek_base_url))
+                .header("x-api-key", api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .json(&payload)
+        })?;
+        self.record_usage(usage_from_claude_response(&response));
+        let text = response
+            .content
+            .into_iter()
+            .filter(|part| part.kind == "text")
+            .filter_map(|part| part.text)
+            .collect::<Vec<_>>()
+            .join("");
+        if text.trim().is_empty() {
+            bail!("DeepSeek response did not contain text content");
+        }
+        Ok(text.trim().to_string())
+    }
+
     fn request_json_with_retry<T, F>(&self, provider: &str, build: F) -> Result<T>
     where
         T: DeserializeOwned,
         F: Fn() -> reqwest::blocking::RequestBuilder,
     {
-        let attempts = self.retries.saturating_add(1).max(1);
+        let attempts = self.request_retries.saturating_add(1).max(1);
         for attempt in 1..=attempts {
             let response = match build().send() {
                 Ok(response) => response,
                 Err(err) if attempt < attempts && should_retry_request(&err) => {
+                    self.record_retry();
                     self.adaptive_concurrency.reduce(provider, &err);
                     let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
                     if self.verbose {
                         eprintln!(
                             "warning: {provider} request failed: {err}; retry {attempt}/{} in {wait_secs}s",
-                            self.retries
+                            self.request_retries
                         );
                     }
                     thread::sleep(Duration::from_secs(wait_secs));
@@ -995,18 +1249,20 @@ impl TranslationBackend {
                 let detail = summarize_http_error_body(std::str::from_utf8(&body).unwrap_or(""));
                 let err = anyhow!("{provider} HTTP {status}: {detail}");
                 if attempt < attempts && (status.as_u16() == 429 || status.is_server_error()) {
+                    self.record_retry();
                     let wait_secs = 2_u64.saturating_pow((attempt - 1).min(5));
                     if self.verbose {
                         eprintln!(
                             "warning: {provider} request failed: {err}; retry {attempt}/{} in {wait_secs}s",
-                            self.retries
+                            self.request_retries
                         );
                     }
                     thread::sleep(Duration::from_secs(wait_secs));
                     continue;
                 }
-                return Err(err)
-                    .with_context(|| format!("failed to call {provider} after {attempt} attempt(s)"));
+                return Err(err).with_context(|| {
+                    format!("failed to call {provider} after {attempt} attempt(s)")
+                });
             }
             match serde_json::from_slice::<T>(&body) {
                 Ok(value) => {
@@ -1038,7 +1294,10 @@ impl TranslationBackend {
     }
 
     fn api_usage_snapshot(&self) -> ApiUsage {
-        self.api_usage.lock().map(|usage| *usage).unwrap_or_default()
+        self.api_usage
+            .lock()
+            .map(|usage| *usage)
+            .unwrap_or_default()
     }
 }
 
@@ -1197,6 +1456,11 @@ pub(crate) fn validate_translation_response(source: &str, translated: &str) -> R
         ));
     }
     validate_placeholder_tokens(source, translated)?;
+    if normalize_for_comparison(source) == normalize_for_comparison(translated)
+        && is_structural_passthrough_source(source)
+    {
+        return Ok(());
+    }
     if is_meaningful_english(source)
         && normalize_for_comparison(source) == normalize_for_comparison(translated)
         && !looks_like_reference_number_list(source)
@@ -1352,6 +1616,203 @@ fn looks_like_reference_number_list(text: &str) -> bool {
                         | ']'
                 )
         })
+}
+
+pub(crate) fn is_structural_passthrough_source(source_text: &str) -> bool {
+    let text = crate::collapse_ws(source_text);
+    let visible = crate::collapse_ws(&text_without_placeholders(source_text));
+    let lower = text.to_ascii_lowercase();
+    let visible_lower = visible.to_ascii_lowercase();
+    if lower.starts_with("doi:") || lower.contains("doi.org/") {
+        return true;
+    }
+    if lower.starts_with("isbn:") || lower.contains("eisbn:") {
+        return true;
+    }
+    if visible_lower.contains("http://")
+        || visible_lower.contains("https://")
+        || visible_lower.contains("www.")
+    {
+        return true;
+    }
+    if looks_like_email_address(&visible) {
+        return true;
+    }
+    looks_like_reference_number_list(&text)
+        || looks_like_index_entry(&text)
+        || looks_like_bibliography_entry(&text)
+        || looks_like_code_or_identifier_block(&text, &visible)
+}
+
+fn looks_like_email_address(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.contains(char::is_whitespace) || !trimmed.contains('@') || !trimmed.contains('.') {
+        return false;
+    }
+    trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '@' | '.' | '_' | '-' | '+'))
+}
+
+fn looks_like_code_or_identifier_block(source: &str, visible: &str) -> bool {
+    let visible = visible.trim();
+    if visible.is_empty() {
+        return !placeholder_signature(source).is_empty();
+    }
+    let lower = visible.to_ascii_lowercase();
+    if contains_code_like_call_or_path(visible, &lower) {
+        return true;
+    }
+    if looks_like_sql_or_program_block(visible, &lower) {
+        return true;
+    }
+    if placeholder_signature(source).len() >= 8 && code_punctuation_count(visible) >= 4 {
+        return true;
+    }
+    false
+}
+
+fn contains_code_like_call_or_path(visible: &str, lower: &str) -> bool {
+    lower.contains("://")
+        || lower.contains("abfss://")
+        || lower.contains("/mnt/")
+        || lower.contains(".parquet")
+        || lower.contains(".json")
+        || lower.contains("df.")
+        || lower.contains("spark.")
+        || lower.contains("dbutils.")
+        || lower.contains("pyspark.")
+        || lower.contains("delta.tables")
+        || lower.contains("@item()")
+        || lower.contains("@concat(")
+        || lower.contains("formatdatetime(")
+        || lower.contains("current_date()")
+        || visible.contains("=>")
+        || visible.contains("==")
+        || visible.contains("!=")
+        || visible.contains("<=")
+        || visible.contains(">=")
+}
+
+fn looks_like_sql_or_program_block(visible: &str, lower: &str) -> bool {
+    let sql_keywords = [
+        "select", "from", "where", "create", "table", "insert", "into", "alter", "grant", "schema",
+        "join", "merge", "drop", "view",
+    ];
+    let keyword_count = sql_keywords
+        .iter()
+        .filter(|keyword| contains_ascii_word(lower, keyword))
+        .count();
+    if keyword_count >= 3 && code_punctuation_count(visible) >= 2 {
+        return true;
+    }
+    let program_keywords = ["import", "from", "def", "class", "return", "if", "with"];
+    let program_keyword_count = program_keywords
+        .iter()
+        .filter(|keyword| contains_ascii_word(lower, keyword))
+        .count();
+    program_keyword_count >= 2 && code_punctuation_count(visible) >= 3
+}
+
+fn contains_ascii_word(lower_text: &str, word: &str) -> bool {
+    lower_text
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .any(|part| part == word)
+}
+
+fn code_punctuation_count(text: &str) -> usize {
+    text.chars()
+        .filter(|ch| {
+            matches!(
+                ch,
+                '(' | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '='
+                    | ';'
+                    | '#'
+                    | '@'
+                    | '\\'
+                    | '/'
+                    | '.'
+                    | '"'
+                    | '\''
+            )
+        })
+        .count()
+}
+
+fn looks_like_index_entry(text: &str) -> bool {
+    if text.chars().count() > 120 || !text.contains(',') || placeholder_signature(text).is_empty() {
+        return false;
+    }
+    let visible = text_without_placeholders(text);
+    visible.chars().any(|ch| ch.is_ascii_digit()) && ascii_word_count(&visible) <= 6
+}
+
+fn looks_like_bibliography_entry(text: &str) -> bool {
+    if text.chars().count() > 260 {
+        return false;
+    }
+    has_four_digit_year(text)
+        && text.ends_with('.')
+        && (text.matches(',').count() >= 2
+            || text.contains(": ")
+            || text.to_ascii_lowercase().contains("press."))
+}
+
+fn deterministic_glossary_translation(
+    source: &str,
+    glossary_subset: &[GlossaryEntry],
+) -> Option<String> {
+    let visible = text_without_placeholders(source);
+    let visible = crate::collapse_ws(&visible);
+    for entry in glossary_subset {
+        let src = entry.src.trim();
+        let dst = entry.dst.trim();
+        if src.is_empty() || dst.is_empty() {
+            continue;
+        }
+        if source.trim() == src {
+            return Some(dst.to_string());
+        }
+        if glossary_heading_match(&visible, src) {
+            return Some(source.replace(src, dst));
+        }
+    }
+    None
+}
+
+fn glossary_heading_match(visible_source: &str, glossary_src: &str) -> bool {
+    if visible_source == glossary_src {
+        return true;
+    }
+    let Some(prefix) = visible_source.strip_suffix(glossary_src) else {
+        return false;
+    };
+    let prefix = prefix.trim();
+    !prefix.is_empty()
+        && prefix
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch.is_whitespace() || matches!(ch, '.' | ':' | '-'))
+}
+
+fn has_four_digit_year(text: &str) -> bool {
+    text.as_bytes()
+        .windows(4)
+        .any(|window| matches!(window, [b'1' | b'2', b'0'..=b'9', b'0'..=b'9', b'0'..=b'9']))
+}
+
+fn text_without_placeholders(text: &str) -> String {
+    tokenize_placeholders(text)
+        .into_iter()
+        .filter_map(|token| match token {
+            Token::Text(text) => Some(text),
+            Token::Open(_) | Token::Close(_) | Token::SelfClose(_) => None,
+        })
+        .collect()
 }
 
 fn likely_untranslated_english(source: &str, translated: &str) -> bool {

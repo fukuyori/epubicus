@@ -185,15 +185,24 @@ impl CacheStore {
     }
 
     pub(crate) fn insert(&mut self, record: CacheRecord) -> Result<()> {
+        self.insert_inner(record, false)
+    }
+
+    pub(crate) fn replace(&mut self, record: CacheRecord) -> Result<()> {
+        self.insert_inner(record, true)
+    }
+
+    fn insert_inner(&mut self, record: CacheRecord, replace_existing: bool) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
         let _lock = FileLock::acquire(&self.lock_path, "write cache")?;
         let disk_entries = read_cache_entries(&self.translations_path)?;
-        if let Some(existing) = disk_entries.get(&record.key) {
+        if let Some(existing) = disk_entries.get(&record.key)
+            && !replace_existing
+        {
             if existing.translated == record.translated {
-                self.entries
-                    .insert(record.key.clone(), existing.clone());
+                self.entries.insert(record.key.clone(), existing.clone());
             } else {
                 self.entries.insert(record.key.clone(), existing.clone());
             }
@@ -209,15 +218,14 @@ impl CacheStore {
         serde_json::to_writer(&mut file, &record)?;
         writeln!(file)?;
         file.flush()?;
-        self.entries
-            .insert(
-                record.key.clone(),
-                CachedTranslation {
-                    translated: record.translated.clone(),
-                    provider: record.provider,
-                    model: record.model,
-                },
-            );
+        self.entries.insert(
+            record.key.clone(),
+            CachedTranslation {
+                translated: record.translated.clone(),
+                provider: record.provider,
+                model: record.model,
+            },
+        );
         self.stats.writes += 1;
         Ok(())
     }
@@ -436,10 +444,7 @@ fn elapsed_secs_between(started_at: &str, finished_at: &str) -> u64 {
     let Ok(finished) = chrono::DateTime::parse_from_rfc3339(finished_at) else {
         return 0;
     };
-    finished
-        .signed_duration_since(started)
-        .num_seconds()
-        .max(0) as u64
+    finished.signed_duration_since(started).num_seconds().max(0) as u64
 }
 
 fn read_cache_entries(path: &Path) -> Result<HashMap<String, CachedTranslation>> {
@@ -532,6 +537,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -542,6 +548,8 @@ mod tests {
             keep_cache: true,
             usage_only: false,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,

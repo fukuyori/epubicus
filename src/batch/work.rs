@@ -141,6 +141,7 @@ pub(super) fn default_model_for_provider(provider: Provider) -> &'static str {
         Provider::Ollama => DEFAULT_MODEL,
         Provider::Openai => DEFAULT_OPENAI_MODEL,
         Provider::Claude => DEFAULT_CLAUDE_MODEL,
+        Provider::Deepseek => DEFAULT_DEEPSEEK_MODEL,
     }
 }
 
@@ -149,6 +150,7 @@ pub(super) fn parse_provider(value: &str) -> Option<Provider> {
         "ollama" => Some(Provider::Ollama),
         "openai" => Some(Provider::Openai),
         "claude" => Some(Provider::Claude),
+        "deepseek" => Some(Provider::Deepseek),
         _ => None,
     }
 }

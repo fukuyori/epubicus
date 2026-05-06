@@ -23,7 +23,7 @@ use quick_xml::name::QName;
 use quick_xml::{Reader, events::Event};
 #[cfg(test)]
 use zip::{
-    CompressionMethod, ZipWriter,
+    CompressionMethod, ZipArchive, ZipWriter,
     write::{FileOptions, SimpleFileOptions},
 };
 
@@ -49,9 +49,9 @@ use config::*;
 #[cfg(test)]
 use epub::local_name;
 use epub::{
-    EpubBook, count_xhtml_blocks, find_nav_item, find_ncx_item, is_translatable_block_start,
-    pack_epub,
-    print_toc_entries, read_nav_toc, read_ncx_toc, unpack_epub, update_opf_metadata,
+    EpubBook, count_xhtml_blocks, detect_auto_kindle_fixed_layout_metadata,
+    detect_kindle_fixed_layout_metadata, find_nav_item, find_ncx_item, is_translatable_block_start,
+    pack_epub, print_toc_entries, read_nav_toc, read_ncx_toc, unpack_epub, update_opf_metadata,
 };
 #[cfg(test)]
 use glossary::GlossaryEntry;
@@ -152,6 +152,8 @@ fn run_cli() -> Result<()> {
 pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     let started = Instant::now();
     let _run_lock = acquire_input_run_lock(&args.input, "translate input EPUB")?;
+    let input = args.input.clone();
+    let glossary = args.common.glossary.clone();
     let output = args
         .output
         .unwrap_or_else(|| default_output_path(&args.input));
@@ -159,6 +161,8 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     let range = normalize_range(args.from, args.to, book.spine.len())?;
     let usage_only = args.common.usage_only;
     let partial_from_cache = args.common.partial_from_cache;
+    let kindle_fixed_layout_requested = args.common.kindle_fixed_layout;
+    let kindle_fixed_layout_disabled = args.common.no_kindle_fixed_layout;
     let cache_args = cache_args_for_read_only_if_needed(&args.common);
     let cache = CacheStore::from_args(&args.input, &cache_args)?;
     let mut translator = Translator::new(args.common, cache)?;
@@ -192,8 +196,20 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
         true,
         Some(&mut untranslated_report),
     )?;
-    update_opf_metadata(&book.opf_path, &translator.backend.model)?;
+    let kindle_fixed_layout = if kindle_fixed_layout_disabled {
+        None
+    } else if kindle_fixed_layout_requested {
+        detect_kindle_fixed_layout_metadata(&book)?
+    } else {
+        detect_auto_kindle_fixed_layout_metadata(&book)?
+    };
+    update_opf_metadata(
+        &book.opf_path,
+        &translator.backend.model,
+        kindle_fixed_layout.as_ref(),
+    )?;
     pack_epub(book.work_dir.path(), &output)?;
+    let untranslated_summary = untranslated_report.finish()?;
     stats.pages_seen = book.spine.len();
     let cache_dir_display = if translator.cache.enabled {
         translator.cache.dir.display().to_string()
@@ -202,8 +218,11 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     };
     let pack_succeeded = true;
     let full_range_translated = stats.pages_translated == book.spine.len() && !partial_from_cache;
-    let cache_was_kept_or_partial =
-        partial_from_cache || translator.cache.keep_cache || !full_range_translated;
+    let has_recovery_items = untranslated_summary.is_some();
+    let cache_was_kept_or_partial = partial_from_cache
+        || translator.cache.keep_cache
+        || !full_range_translated
+        || has_recovery_items;
     let total_elapsed_secs = translator
         .cache
         .finish_manifest_run()?
@@ -218,33 +237,74 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     } else {
         cache_dir_display.clone()
     };
-    eprintln!(
-        "Done. Output: {} | pages translated: {} | blocks translated: {} | provider: {} | model: {} | cache hits: {} | misses: {} | writes: {} | cache: {} | elapsed: {} | total active: {}",
-        output.display(),
-        stats.pages_translated,
-        stats.blocks_translated,
-        translator.backend.provider,
-        translator.backend.model,
-        translator.cache.stats.hits,
-        translator.cache.stats.misses,
-        translator.cache.stats.writes,
-        cache_status,
-        format_duration_hms(started.elapsed()),
-        format_duration_hms(Duration::from_secs(total_elapsed_secs)),
-    );
-    if let Some(summary) = translator.api_usage_summary() {
-        eprintln!("API usage: {summary}");
-    }
-    if translator.fallback_count > 0 {
-        eprintln!("Fallback translations: {}", translator.fallback_count);
-    }
-    if let Some(summary) = untranslated_report.finish()? {
+    eprintln!("Done.");
+    eprintln!("Output: {}", output.display());
+    eprintln!("Translation:");
+    eprintln!("  provider: {}", translator.backend.provider);
+    eprintln!("  model: {}", translator.backend.model);
+    eprintln!("  pages translated: {}", stats.pages_translated);
+    eprintln!("  blocks translated: {}", stats.blocks_translated);
+    eprintln!("Cache:");
+    eprintln!("  hits: {}", translator.cache.stats.hits);
+    eprintln!("  misses: {}", translator.cache.stats.misses);
+    eprintln!("  writes: {}", translator.cache.stats.writes);
+    eprintln!("  location: {cache_status}");
+    if let Some(summary) = &untranslated_summary {
         eprintln!(
             "Untranslated report: {} block(s) written to {}",
             summary.count,
             summary.path.display()
         );
         eprintln!("Recovery log: {}", summary.recovery_path.display());
+    }
+    if translator.cache.enabled
+        && cache_was_kept_or_partial
+        && !has_recovery_items
+        && translator.cache.stats.misses == 0
+    {
+        eprintln!("Complete:");
+        eprintln!("  no cache misses or untranslated blocks remain.");
+    } else if translator.cache.enabled && cache_was_kept_or_partial {
+        eprintln!("Resume:");
+        if let Some(summary) = &untranslated_summary {
+            eprintln!("  recover the untranslated blocks, then rebuild from the cache.");
+            eprintln!(
+                "  recover: {}",
+                recovery_command(
+                    &summary.recovery_path,
+                    &output,
+                    &translator.cache.root,
+                    translator.backend.provider,
+                    &translator.backend.model,
+                    glossary.as_deref(),
+                )
+            );
+        } else {
+            eprintln!("  rerun the same command to continue; cached blocks will be reused.");
+            eprintln!(
+                "  partial rebuild: {}",
+                partial_rebuild_command(
+                    &input,
+                    &output,
+                    &translator.cache.root,
+                    translator.backend.provider,
+                    &translator.backend.model,
+                    glossary.as_deref(),
+                )
+            );
+        }
+    }
+    eprintln!("Time:");
+    eprintln!("  elapsed: {}", format_duration_hms(started.elapsed()));
+    eprintln!(
+        "  total active: {}",
+        format_duration_hms(Duration::from_secs(total_elapsed_secs))
+    );
+    if let Some(summary) = translator.api_usage_summary() {
+        eprintln!("API usage: {summary}");
+    }
+    if translator.fallback_count > 0 {
+        eprintln!("Fallback translations: {}", translator.fallback_count);
     }
     if partial_from_cache && translator.cache.stats.misses > 0 {
         return Err(recoverable_error(format!(
@@ -374,11 +434,90 @@ fn format_duration_hms(duration: Duration) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
+fn partial_rebuild_command(
+    input: &Path,
+    output: &Path,
+    cache_root: &Path,
+    provider: Provider,
+    model: &str,
+    glossary: Option<&Path>,
+) -> String {
+    let mut parts = vec![
+        "cargo".to_string(),
+        "run".to_string(),
+        "--release".to_string(),
+        "--".to_string(),
+        "translate".to_string(),
+        shell_arg(input.display().to_string()),
+        "--provider".to_string(),
+        provider.to_string(),
+        "--model".to_string(),
+        shell_arg(model),
+        "--cache-root".to_string(),
+        shell_arg(cache_root.display().to_string()),
+        "--partial-from-cache".to_string(),
+        "--keep-cache".to_string(),
+        "--output".to_string(),
+        shell_arg(output.display().to_string()),
+    ];
+    if let Some(glossary) = glossary {
+        parts.push("--glossary".to_string());
+        parts.push(shell_arg(glossary.display().to_string()));
+    }
+    parts.join(" ")
+}
+
+fn recovery_command(
+    recovery_log: &Path,
+    output: &Path,
+    cache_root: &Path,
+    provider: Provider,
+    model: &str,
+    glossary: Option<&Path>,
+) -> String {
+    let mut parts = vec![
+        "cargo".to_string(),
+        "run".to_string(),
+        "--release".to_string(),
+        "--".to_string(),
+        "recover".to_string(),
+        shell_arg(recovery_log.display().to_string()),
+        "--provider".to_string(),
+        provider.to_string(),
+        "--model".to_string(),
+        shell_arg(model),
+        "--cache-root".to_string(),
+        shell_arg(cache_root.display().to_string()),
+        "--rebuild".to_string(),
+        "--output".to_string(),
+        shell_arg(output.display().to_string()),
+    ];
+    if let Some(glossary) = glossary {
+        parts.push("--glossary".to_string());
+        parts.push(shell_arg(glossary.display().to_string()));
+    }
+    parts.join(" ")
+}
+
+fn shell_arg(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '$' | '&' | '|'))
+    {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        value.to_string()
+    }
+}
+
 fn default_model_for_provider(provider: Provider) -> &'static str {
     match provider {
         Provider::Ollama => DEFAULT_MODEL,
         Provider::Openai => DEFAULT_OPENAI_MODEL,
         Provider::Claude => DEFAULT_CLAUDE_MODEL,
+        Provider::Deepseek => DEFAULT_DEEPSEEK_MODEL,
     }
 }
 
@@ -426,7 +565,7 @@ fn translate_book(
         }
         stats.pages_translated += 1;
         if let Some(progress) = progress.as_mut() {
-            progress.set_page(page_no, book.spine.len(), &item.href);
+            progress.set_page(page_no, book.spine.len());
         }
         if mode == Mode::Stdout {
             println!("\n===== spine page {page_no}: {} =====\n", item.href);
@@ -701,6 +840,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -711,6 +851,8 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: true,
@@ -720,7 +862,7 @@ mod tests {
         let stats = translate_book(&book, 1..=2, &mut translator, Mode::Write, false, None)?;
         assert_eq!(stats.pages_translated, 2);
         assert_eq!(stats.blocks_translated, 3);
-        update_opf_metadata(&book.opf_path, &translator.backend.model)?;
+        update_opf_metadata(&book.opf_path, &translator.backend.model, None)?;
         pack_epub(book.work_dir.path(), &output)?;
 
         let repacked = unpack_epub(&output)?;
@@ -1167,6 +1309,90 @@ mod tests {
     }
 
     #[test]
+    fn translation_validation_accepts_structural_passthrough_sources() -> Result<()> {
+        let doi = "DOI: ⟦E1⟧https://doi.org/10.7208/chicago/9780226448107.001.0001⟦/E1⟧";
+        validate_translation_response(doi, doi)?;
+
+        let index = "Becker, Howard S., ⟦E1⟧11⟦/E1⟧";
+        validate_translation_response(index, index)?;
+
+        let reference = "Booth, Wayne C., Gregory G. Colomb, Joseph M. Williams, Joseph Bizup, and William T. FitzGerald. 2016. ⟦E1⟧The Craft of Research⟦/E1⟧. 4th ed. Chicago: University of Chicago Press.";
+        validate_translation_response(reference, reference)?;
+
+        let single_author_reference = "Hayek, Friedrich. 1994. ⟦E1⟧Hayek on Hayek⟦/E1⟧. Interviews and essays edited by Stephen Kresge and Leif Wener. Chicago: University of Chicago Press.";
+        validate_translation_response(single_author_reference, single_author_reference)?;
+        Ok(())
+    }
+
+    #[test]
+    fn translation_validation_still_rejects_unchanged_prose() {
+        let source = "The student will sometimes use an implied author encountered only in government forms, using phrases like due to and period of time.";
+        let err = validate_translation_response(source, source).unwrap_err();
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::UnchangedSource)
+        );
+    }
+
+    #[test]
+    fn partial_from_cache_uses_deterministic_glossary_heading_translation() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("minimal.epub");
+        let output = dir.path().join("minimal.ja.epub");
+        let glossary_path = dir.path().join("glossary.json");
+        write_minimal_epub_with_body(&input, "<h1>Control Your Tone</h1>")?;
+        fs::write(
+            &glossary_path,
+            r#"{"entries":[{"src":"Control Your Tone","dst":"語調を整える"}]}"#,
+        )?;
+
+        let common = CommonArgs {
+            provider: Provider::Deepseek,
+            model: Some(DEFAULT_DEEPSEEK_MODEL.to_string()),
+            fallback_provider: None,
+            fallback_model: None,
+            ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
+            claude_base_url: DEFAULT_CLAUDE_BASE_URL.to_string(),
+            openai_api_key: None,
+            anthropic_api_key: None,
+            prompt_api_key: false,
+            temperature: 0.3,
+            num_ctx: 8192,
+            timeout_secs: 900,
+            retries: 3,
+            validation_retries: 1,
+            max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
+            concurrency: DEFAULT_CONCURRENCY,
+            style: "essay".to_string(),
+            glossary: Some(glossary_path),
+            cache_root: Some(dir.path().join("cache")),
+            no_cache: false,
+            clear_cache: false,
+            keep_cache: true,
+            usage_only: false,
+            partial_from_cache: true,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
+            passthrough_on_validation_failure: false,
+            verbose: false,
+            dry_run: false,
+        };
+
+        translate_command(TranslateArgs {
+            input,
+            output: Some(output.clone()),
+            from: Some(1),
+            to: Some(1),
+            common,
+        })?;
+
+        let content = read_epub_text_file(&output, "OEBPS/chapter1.xhtml")?;
+        assert!(content.contains("語調を整える"));
+        Ok(())
+    }
+
+    #[test]
     fn translation_validation_rejects_long_partial_english_segment() {
         let source = "Wide range of the modern fairy tale. The bibliography will suggest something of the treasures in the field of the modern fanciful story. From the delightful nonsense of Alice in Wonderland and the travelers' tales of Baron Munchausen to the profound seriousness of The King of the Golden River is a far cry.";
         let translated = "近代童話の広い範囲。The bibliography will suggest something of the treasures in the field of the modern fanciful story. From the delightful nonsense of Alice in Wonderland and the travelers' tales of Baron Munchausen to the profound seriousness of The King of the Golden River is a far cry.";
@@ -1236,6 +1462,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -1246,6 +1473,8 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,
@@ -1287,6 +1516,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -1297,6 +1527,8 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,
@@ -1361,6 +1593,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -1371,6 +1604,8 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: true,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,
@@ -1412,6 +1647,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -1422,6 +1658,8 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: true,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,
@@ -1437,7 +1675,9 @@ mod tests {
         })?;
         let mut translator = Translator::new(args, cache)?;
 
-        match translator.translate_many(&[source.clone()], None)?.remove(0)
+        match translator
+            .translate_many(&[source.clone()], None)?
+            .remove(0)
         {
             Translation::Translated { text, from_cache } => {
                 assert_eq!(text, source);
@@ -1485,6 +1725,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -1495,6 +1736,8 @@ mod tests {
             keep_cache: false,
             usage_only: false,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,
@@ -1528,6 +1771,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -1538,6 +1782,8 @@ mod tests {
             keep_cache: true,
             usage_only: false,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,
@@ -1570,6 +1816,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -1580,6 +1827,8 @@ mod tests {
             keep_cache: false,
             usage_only: true,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
             dry_run: false,
@@ -1598,6 +1847,15 @@ mod tests {
     }
 
     fn write_minimal_epub(path: &Path) -> Result<()> {
+        write_minimal_epub_with_body(
+            path,
+            r#"
+  <h1>Chapter One</h1>
+  <p>This is <em>very</em> important.<br /></p>"#,
+        )
+    }
+
+    fn write_minimal_epub_with_body(path: &Path, chapter1_body: &str) -> Result<()> {
         let file = File::create(path)?;
         let mut zip = ZipWriter::new(file);
         let stored: SimpleFileOptions =
@@ -1637,12 +1895,11 @@ mod tests {
 </package>"#,
         )?;
         zip.start_file("OEBPS/chapter1.xhtml", deflated)?;
-        zip.write_all(
-            br#"<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml"><body>
-  <h1>Chapter One</h1>
-  <p>This is <em>very</em> important.<br /></p>
-</body></html>"#,
+        write!(
+            zip,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>{chapter1_body}
+</body></html>"#
         )?;
         zip.start_file("OEBPS/chapter2.xhtml", deflated)?;
         zip.write_all(
@@ -1667,5 +1924,14 @@ mod tests {
         )?;
         zip.finish()?;
         Ok(())
+    }
+
+    fn read_epub_text_file(path: &Path, name: &str) -> Result<String> {
+        let file = File::open(path)?;
+        let mut zip = ZipArchive::new(file)?;
+        let mut entry = zip.by_name(name)?;
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut text)?;
+        Ok(text)
     }
 }

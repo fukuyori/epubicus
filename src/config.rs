@@ -6,8 +6,10 @@ pub(crate) const DEFAULT_MODEL: &str = "qwen3:14b";
 pub(crate) const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
 pub(crate) const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
 pub(crate) const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5";
+pub(crate) const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 pub(crate) const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const DEFAULT_CLAUDE_BASE_URL: &str = "https://api.anthropic.com/v1";
+pub(crate) const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/anthropic";
 pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub(crate) const DEFAULT_MAX_CHARS_PER_REQUEST: usize = 3500;
 pub(crate) const DEFAULT_CONCURRENCY: usize = 1;
@@ -17,7 +19,9 @@ pub(crate) const DEFAULT_BATCH_MAX_BYTES_PER_FILE: usize = 200_000_000;
 #[derive(Parser)]
 #[command(name = "epubicus")]
 #[command(version)]
-#[command(about = "Translate English EPUB files to Japanese with Ollama, OpenAI, or Claude")]
+#[command(
+    about = "Translate English EPUB files to Japanese with Ollama, OpenAI, Claude, or DeepSeek"
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Commands,
@@ -93,9 +97,12 @@ pub(crate) struct CommonArgs {
         default_value_t = 900
     )]
     pub(crate) timeout_secs: u64,
-    /// Number of retries after the initial request for timeout, connection, rate limit, server errors, or validation failures.
+    /// Number of retries after the initial request for timeout, connection, rate limit, or server errors.
     #[arg(short = 'r', long, env = "EPUBICUS_RETRIES", default_value_t = 3)]
     pub(crate) retries: u32,
+    /// Number of retries after the initial provider response fails translation validation.
+    #[arg(long, env = "EPUBICUS_VALIDATION_RETRIES", default_value_t = 1)]
+    pub(crate) validation_retries: u32,
     /// Maximum source characters per provider request. Long blocks are split at sentence boundaries.
     #[arg(short = 'x', long, env = "EPUBICUS_MAX_CHARS_PER_REQUEST", default_value_t = DEFAULT_MAX_CHARS_PER_REQUEST)]
     pub(crate) max_chars_per_request: usize,
@@ -130,6 +137,12 @@ pub(crate) struct CommonArgs {
     /// Create a partial EPUB from cached translations and keep cache misses unchanged.
     #[arg(long = "partial-from-cache")]
     pub(crate) partial_from_cache: bool,
+    /// Add Kindle fixed-layout metadata using the EPUB page viewport.
+    #[arg(long)]
+    pub(crate) kindle_fixed_layout: bool,
+    /// Do not auto-add Kindle fixed-layout metadata.
+    #[arg(long)]
+    pub(crate) no_kindle_fixed_layout: bool,
     /// After validation retries are exhausted, keep the original block instead of aborting.
     #[arg(long, env = "EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE")]
     pub(crate) passthrough_on_validation_failure: bool,
@@ -143,6 +156,7 @@ pub(crate) enum Provider {
     Ollama,
     Openai,
     Claude,
+    Deepseek,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -172,6 +186,7 @@ impl std::fmt::Display for Provider {
             Provider::Ollama => write!(f, "ollama"),
             Provider::Openai => write!(f, "openai"),
             Provider::Claude => write!(f, "claude"),
+            Provider::Deepseek => write!(f, "deepseek"),
         }
     }
 }
@@ -256,6 +271,9 @@ pub(crate) struct RecoverArgs {
     /// Failed-item JSONL path. Defaults to <log stem>.failed.jsonl.
     #[arg(long)]
     pub(crate) failed_log: Option<PathBuf>,
+    /// JSON file with manual translations to write directly into the recovery cache.
+    #[arg(long)]
+    pub(crate) manual: Option<PathBuf>,
     /// Rebuild the EPUB from cache after every selected item is recovered.
     #[arg(long)]
     pub(crate) rebuild: bool,

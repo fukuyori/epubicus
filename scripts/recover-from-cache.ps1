@@ -1,3 +1,6 @@
+# Advanced recovery helper. Prefer provider-specific wrappers such as
+# recover-deepseek.ps1 and manual-recover-deepseek.ps1 for daily use.
+#
 # Recover blocks from the newest recovery log for an input EPUB.
 #
 # This is useful after normal translate / partial-from-cache runs when epubicus
@@ -6,18 +9,23 @@
 # Usage:
 #   .\scripts\recover-from-cache.ps1 .\book.epub
 #   .\scripts\recover-from-cache.ps1 .\book.epub -CacheRoot .\.local-ollama-cache
-#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider ollama -Model qwen3:14b -NoRun
+#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
+#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -NoRun
 
 param(
     [Parameter(Position = 0)]
     [string]$InputPath,
 
-    [ValidateSet("ollama", "openai", "claude")]
+    [ValidateSet("ollama", "openai", "claude", "deepseek")]
     [string]$Provider = "ollama",
 
-    [string]$Model = "qwen3:14b",
+    [string]$Model,
 
     [string]$CacheRoot,
+
+    [string]$Glossary,
+
+    [string]$Manual,
 
     [int]$Limit = 0,
 
@@ -31,6 +39,10 @@ param(
 
     [switch]$NoRebuild,
 
+    [switch]$KindleFixedLayout,
+
+    [switch]$NoKindleFixedLayout,
+
     [switch]$List,
 
     [string]$EpubicusExe,
@@ -40,24 +52,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($KindleFixedLayout -and $NoKindleFixedLayout) {
+    throw "-KindleFixedLayout and -NoKindleFixedLayout cannot be used together."
+}
+
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($InputPath)) {
     $InputPath = Join-Path $ProjectRoot "test\sample.epub"
 }
 $InputEpub = (Resolve-Path -LiteralPath $InputPath).Path
+$inputDir = Split-Path -Parent $InputEpub
+$inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($InputEpub)
 
 function Resolve-EpubicusExe {
     param([string]$Preferred)
     if (-not [string]::IsNullOrWhiteSpace($Preferred)) {
         return (Resolve-Path -LiteralPath $Preferred).Path
-    }
-    $debugExe = Join-Path $ProjectRoot "target\debug\epubicus.exe"
-    if (Test-Path -LiteralPath $debugExe -PathType Leaf) {
-        return (Resolve-Path -LiteralPath $debugExe).Path
-    }
-    $releaseExe = Join-Path $ProjectRoot "target\release\epubicus.exe"
-    if (Test-Path -LiteralPath $releaseExe -PathType Leaf) {
-        return (Resolve-Path -LiteralPath $releaseExe).Path
     }
     return $null
 }
@@ -70,7 +80,34 @@ function Resolve-CacheRoot {
     return (Resolve-Path -LiteralPath $Path).Path
 }
 
+if ([string]::IsNullOrWhiteSpace($CacheRoot) -and $Provider -eq "deepseek") {
+    $CacheRoot = Join-Path $ProjectRoot ".deepseek-cache"
+}
 $ResolvedCacheRoot = Resolve-CacheRoot $CacheRoot
+
+if ([string]::IsNullOrWhiteSpace($Model)) {
+    $Model = switch ($Provider) {
+        "openai" { "gpt-5-mini" }
+        "claude" { "claude-sonnet-4-5" }
+        "deepseek" { "deepseek-v4-flash" }
+        default { "qwen3:14b" }
+    }
+}
+
+$GlossaryPath = $null
+if (-not [string]::IsNullOrWhiteSpace($Glossary)) {
+    $GlossaryPath = (Resolve-Path -LiteralPath $Glossary).Path
+} else {
+    $candidateGlossary = Join-Path $inputDir "$inputBaseName.json"
+    if (Test-Path -LiteralPath $candidateGlossary -PathType Leaf) {
+        $GlossaryPath = (Resolve-Path -LiteralPath $candidateGlossary).Path
+    }
+}
+
+$ManualPath = $null
+if (-not [string]::IsNullOrWhiteSpace($Manual)) {
+    $ManualPath = (Resolve-Path -LiteralPath $Manual).Path
+}
 
 $args = @(
     "recover",
@@ -83,6 +120,12 @@ if (-not [string]::IsNullOrWhiteSpace($ResolvedCacheRoot)) {
 }
 if ($Limit -gt 0) {
     $args += @("--limit", "$Limit")
+}
+if (-not [string]::IsNullOrWhiteSpace($GlossaryPath)) {
+    $args += @("--glossary", $GlossaryPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($ManualPath)) {
+    $args += @("--manual", $ManualPath)
 }
 if ($Page -gt 0) {
     $args += @("--page", "$Page")
@@ -103,6 +146,12 @@ if ($List) {
 if (-not [string]::IsNullOrWhiteSpace($Output)) {
     $args += @("--output", $Output)
 }
+if ($KindleFixedLayout) {
+    $args += "--kindle-fixed-layout"
+}
+if ($NoKindleFixedLayout) {
+    $args += "--no-kindle-fixed-layout"
+}
 
 $exe = Resolve-EpubicusExe $EpubicusExe
 
@@ -115,6 +164,12 @@ if (-not [string]::IsNullOrWhiteSpace($ResolvedCacheRoot)) {
 }
 Write-Host "Provider  = $Provider"
 Write-Host "Model     = $Model"
+if (-not [string]::IsNullOrWhiteSpace($GlossaryPath)) {
+    Write-Host "Glossary  = $GlossaryPath"
+}
+if (-not [string]::IsNullOrWhiteSpace($ManualPath)) {
+    Write-Host "Manual    = $ManualPath"
+}
 Write-Host ""
 
 if ($null -ne $exe) {
@@ -124,9 +179,9 @@ if ($null -ne $exe) {
         exit $LASTEXITCODE
     }
 } else {
-    Write-Host "cargo run -- $($args -join ' ')"
+    Write-Host "cargo run --release -- $($args -join ' ')"
     if (-not $NoRun) {
-        cargo run -- @args
+        cargo run --release -- @args
         exit $LASTEXITCODE
     }
 }

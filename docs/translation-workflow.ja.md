@@ -73,7 +73,7 @@ book.md    ChatGPT / Claude などで候補をレビューするためのプロ�
 
 ## 事前確認
 
-EPUB の spine 番号を確認します。`--from` / `--to` はリーダー上のページ番号ではなく、OPF spine の 1 始まり番号です。
+EPUB の読む順番を確認します。spine 番号は EPUB 内部で定義されている本文ファイルの順番です。`--from` / `--to` はリーダー上のページ番号ではなく、`inspect-epub.ps1` で表示される 1 始まりの spine 番号です。
 
 ```powershell
 cargo run -- inspect .\book.epub
@@ -86,7 +86,7 @@ cargo run -- toc .\book.epub
 cargo run -- translate .\book.epub --from 3 --to 3 --dry-run
 ```
 
-以降のスクリプトは本番向けに `cargo run --release -- ...` を使うものがあります。release バイナリ更新中に実行中プロセスへ影響する場合があるため、開発中の確認だけなら `cargo build` と `target\debug\epubicus.exe` で確認してください。
+以降のスクリプトは本番向けに `cargo run --release -- ...` を使います。実処理はできるだけスクリプトを使い、長い cargo コマンドを手で組み立てないようにします。スクリプトは原則として 3 つ以内の引数で日常実行できる形にし、特別な指示が必要な場合でも 4 つまでに収めます。コード確認だけなら `cargo check` / `cargo test` / `cargo run -- ... --dry-run` などのデバッグビルドで確認してください。
 
 ## 方式1: ローカル Ollama
 
@@ -118,7 +118,7 @@ Copy-Item .\scripts\local-ollama-env.template.ps1 .\scripts\local-ollama-env.ps1
 
 ### Ollama のリカバリー
 
-途中で止まった場合は、同じコマンドを再実行します。成功済みブロックはキャッシュから飛ばされ、未処理分から続きます。
+途中で止まった場合は、同じコマンドを再実行します。成功済みブロックはキャッシュから飛ばされ、未処理分から続きます。完了サマリーの `Resume:` に、同じコマンドで続行できることと、途中結果を EPUB に組み立てる `partial rebuild` コマンドが表示されます。
 
 未翻訳が残った EPUB ができた場合は、復旧ログを使います。`translate` の最後に `Recovery log:` と表示されたパスを指定します。
 
@@ -164,7 +164,7 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
   -Model qwen3:14b
 ```
 
-## 方式2: OpenAI / Claude 通常 API
+## 方式2: OpenAI / Claude / DeepSeek 通常 API
 
 小さめの本、またはすぐに結果を見たい場合に使います。未キャッシュ部分のリクエスト数に応じて課金されます。
 
@@ -203,14 +203,94 @@ $env:ANTHROPIC_API_KEY = Read-Host "Anthropic API key" -MaskInput
 .\scripts\claude-env.ps1 .\book.epub
 ```
 
+DeepSeek:
+
+`3 3` は開始番号と終了番号です。どちらも `3` なので、`inspect-epub.ps1` の一覧で 3 番目に出る本文ファイルだけを対象にします。読書アプリ上のページ番号ではありません。
+
+```powershell
+$env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
+.\scripts\usage-deepseek.ps1 .\book.epub 3 3
+.\scripts\page-deepseek.ps1 .\book.epub 3 3
+.\scripts\convert-deepseek.ps1 .\book.epub
+```
+
+`convert-deepseek.ps1` には `translate` の追加オプションをそのまま渡せます。小説向けに翻訳する場合:
+
+```powershell
+.\scripts\convert-deepseek.ps1 .\book.epub --style novel
+```
+
+丁寧寄りの小説文体にする場合:
+
+```powershell
+.\scripts\convert-deepseek.ps1 .\book.epub --style novel-polite
+```
+
+DeepSeek の model や並列数を固定で変えたい場合だけ、`deepseek-env.template.ps1` を `deepseek-env.ps1` にコピーして編集します。
+
 ### 通常 API のリカバリー
 
-途中で止まった場合は同じスクリプトを再実行します。キャッシュ済みブロックは再利用されます。
+途中で止まった場合は同じスクリプトを再実行します。キャッシュ済みブロックは再利用されます。provider / model / glossary を変えると別キャッシュキーになるため、再開時は同じ設定を使ってください。
 
 未翻訳レポートや復旧ログが出た場合は、`recover` で不足分だけ再翻訳します。OpenAI で失敗した箇所を Ollama に回すなど、provider を変えても構いません。
 
 ```powershell
 cargo run -- recover --cache .\book.epub --provider ollama --model qwen3:14b --rebuild
+```
+
+DeepSeek で同じキャッシュから復旧する場合:
+
+```powershell
+.\scripts\recover-deepseek.ps1 .\book.epub
+```
+
+`recover-from-cache.ps1` は provider に応じた既定 cache root を使います。DeepSeek では `.deepseek-cache` を使い、同じディレクトリに `book.json` があれば glossary として自動指定します。実行前に内容だけ確認する場合は `-NoRun` を付けます。
+
+```powershell
+.\scripts\recover-deepseek.ps1 .\book.epub -NoRun
+```
+
+### 直接キャッシュを修正する
+
+同じ provider/model で何度リカバリーしても残る少数のブロックは、人手で訳してキャッシュへ直接入れられます。復旧ログの `page` / `block` / `href`、または `cache_key` に対応する手動訳 JSON を作ります。
+
+```json
+{
+  "entries": [
+    {
+      "page": 23,
+      "block": 2,
+      "href": "text/part0021.html",
+      "text": "スタジオが形を成す"
+    },
+    {
+      "cache_key": "0123456789abcdef...",
+      "translated": "手動で確定した訳文"
+    }
+  ]
+}
+```
+
+`--manual` を付けて `recover` を実行すると、一致した item は provider に送らず、その訳文を直接キャッシュへ書き込みます。`--rebuild` を付けると、更新後のキャッシュから EPUB も作り直します。
+
+```powershell
+$log = ".\.deepseek-cache\<hash>\recovery\book_jp\recovery.jsonl"
+cargo run -- recover $log `
+  --manual .\book.manual.json `
+  --provider deepseek `
+  --model deepseek-v4-flash `
+  --cache-root .\.deepseek-cache `
+  --rebuild `
+  --output .\book_jp.epub `
+  --glossary .\book.json
+```
+
+手動訳に一致しない item が同じログに残っている場合は、通常通り provider で復旧を試みます。完全に手作業だけで処理したい場合は、`--page` / `--block` / `--limit` で対象を絞ってください。
+
+通常は入力 EPUB から最新ログを探すスクリプトで実行します。
+
+```powershell
+.\scripts\manual-recover-deepseek.ps1 .\book.epub .\book.manual.json
 ```
 
 OpenAI 用キャッシュから復旧する例:
@@ -250,6 +330,12 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
   -CacheRoot .\.openai-cache `
   -Provider ollama `
   -Model qwen3:14b
+```
+
+出力 EPUB が `<入力名>_jp.epub` の場合は、第 2 引数を省略できます。DeepSeek で検査と復旧をまとめて行う例:
+
+```powershell
+.\scripts\scan-recover-deepseek.ps1 .\book.epub
 ```
 
 ## 方式3: OpenAI Batch API
@@ -409,6 +495,8 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
 .\scripts\scan-and-recover.ps1 .\book.epub .\book_jp.epub -ScanOnly
 ```
 
+`scan-and-recover.ps1` は第 2 引数を省略すると `<入力名>_jp.epub` を検査します。provider を指定すると、その provider の既定 cache root と同名 glossary を使います。PowerShell の行継続記号 `` ` `` の後ろには、空白を入れないでください。
+
 未翻訳候補が出なければ完了です。候補が出た場合は `recover` または `scan-recovery --recover --rebuild` で不足分を埋めます。
 
 Batch の場合は、あわせて health を確認します。
@@ -424,6 +512,20 @@ cache-backed: 全件/全件
 effective remaining: 0
 ```
 
+## Send to Kindle 用に出す場合
+
+画像と文章を固定配置している EPUB は、Send to Kindle の変換でリフロー扱いになると、画像と文章の位置がオリジナルからずれることがあります。epubicus は、viewport と固定配置らしいページ構造を検出した場合、完成後の EPUB に Kindle 向け固定レイアウトメタデータを自動追加します。
+
+```powershell
+.\scripts\rebuild-deepseek.ps1 .\book.epub
+```
+
+強制的に追加する場合は `--kindle-fixed-layout`、自動追加を止める場合は `--no-kindle-fixed-layout` を付けます。リフロー前提の通常 EPUB に固定レイアウトメタデータを付けると読みやすさが落ちる場合があります。
+
+```powershell
+.\scripts\rebuild-deepseek.ps1 .\book.epub fixed
+```
+
 ## キャッシュ掃除
 
 通常キャッシュだけなら `cache clear` を使います。
@@ -432,7 +534,7 @@ effective remaining: 0
 cargo run -- cache clear --all
 ```
 
-スクリプトは方式ごとに `.openai-cache`、`.batch-openai-cache`、`.local-ollama-cache`、`.claude-cache` を使うため、通常キャッシュ掃除だけでは残る場合があります。まとめて確認するには:
+スクリプトは方式ごとに `.openai-cache`、`.batch-openai-cache`、`.local-ollama-cache`、`.claude-cache`、`.deepseek-cache` を使うため、通常キャッシュ掃除だけでは残る場合があります。まとめて確認するには:
 
 ```powershell
 .\scripts\clear-all-caches.ps1 -DryRun

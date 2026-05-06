@@ -55,7 +55,8 @@ $candidateRoots = @(
     (Join-Path $ProjectRoot ".openai-cache"),
     (Join-Path $ProjectRoot ".batch-openai-cache"),
     (Join-Path $ProjectRoot ".local-ollama-cache"),
-    (Join-Path $ProjectRoot ".claude-cache")
+    (Join-Path $ProjectRoot ".claude-cache"),
+    (Join-Path $ProjectRoot ".deepseek-cache")
 )
 
 foreach ($path in $Include) {

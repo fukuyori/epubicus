@@ -51,7 +51,8 @@ if (-not $Force) {
         $existing += $OutputMarkdown
     }
     if ($existing.Count -gt 0) {
-        Write-Error "Output file already exists. Use -Force to overwrite: $($existing -join ', ')"
+        Write-Warning "Output file already exists; leaving it unchanged. Use -Force to overwrite: $($existing -join ', ')"
+        exit 0
     }
 }
 
@@ -70,13 +71,6 @@ Write-Host "JSON      = $OutputJson"
 Write-Host "Markdown  = $OutputMarkdown"
 Write-Host ""
 
-if ([string]::IsNullOrWhiteSpace($EpubicusExe)) {
-    $debugExe = Join-Path $ProjectRoot "target\debug\epubicus.exe"
-    if (Test-Path -LiteralPath $debugExe -PathType Leaf) {
-        $EpubicusExe = $debugExe
-    }
-}
-
 if (-not [string]::IsNullOrWhiteSpace($EpubicusExe)) {
     $EpubicusExe = (Resolve-Path -LiteralPath $EpubicusExe).Path
     Write-Host "$EpubicusExe $($args -join ' ')"
@@ -85,9 +79,9 @@ if (-not [string]::IsNullOrWhiteSpace($EpubicusExe)) {
         exit $LASTEXITCODE
     }
 } else {
-    Write-Host "cargo run -- $($args -join ' ')"
+    Write-Host "cargo run --release -- $($args -join ' ')"
     if (-not $NoRun) {
-        cargo run -- @args
+        cargo run --release -- @args
         exit $LASTEXITCODE
     }
 }

@@ -421,7 +421,78 @@ pub(crate) fn print_toc_entries(entries: &[TocEntry]) {
     }
 }
 
-pub(crate) fn update_opf_metadata(opf_path: &Path, model: &str) -> Result<()> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KindleFixedLayoutMetadata {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl KindleFixedLayoutMetadata {
+    fn original_resolution(&self) -> String {
+        format!("{}x{}", self.width, self.height)
+    }
+
+    fn orientation_lock(&self) -> &'static str {
+        if self.width > self.height {
+            "landscape"
+        } else {
+            "portrait"
+        }
+    }
+}
+
+pub(crate) fn detect_kindle_fixed_layout_metadata(
+    book: &EpubBook,
+) -> Result<Option<KindleFixedLayoutMetadata>> {
+    for item in &book.spine {
+        let Some(viewport) = read_xhtml_viewport(&item.abs_path)? else {
+            continue;
+        };
+        if let Some(metadata) = parse_viewport_resolution(&viewport) {
+            return Ok(Some(metadata));
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn detect_auto_kindle_fixed_layout_metadata(
+    book: &EpubBook,
+) -> Result<Option<KindleFixedLayoutMetadata>> {
+    let mut checked = 0usize;
+    let mut viewport_count = 0usize;
+    let mut fixed_evidence_count = 0usize;
+    let mut first_metadata = None;
+
+    for item in book.spine.iter().take(24) {
+        let source = fs::read_to_string(&item.abs_path)
+            .with_context(|| format!("failed to read {}", item.abs_path.display()))?;
+        checked += 1;
+        if let Some(viewport) = xhtml_viewport_from_str(&source)? {
+            if let Some(metadata) = parse_viewport_resolution(&viewport) {
+                first_metadata.get_or_insert(metadata);
+                viewport_count += 1;
+                if has_fixed_layout_page_evidence(&source) {
+                    fixed_evidence_count += 1;
+                }
+            }
+        }
+    }
+
+    let enough_viewports = viewport_count >= 4 && viewport_count * 2 >= checked.max(1);
+    let enough_fixed_evidence =
+        fixed_evidence_count >= 4 && fixed_evidence_count * 2 >= viewport_count.max(1);
+    if enough_viewports && enough_fixed_evidence {
+        Ok(first_metadata)
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) fn update_opf_metadata(
+    opf_path: &Path,
+    model: &str,
+    kindle_fixed_layout: Option<&KindleFixedLayoutMetadata>,
+) -> Result<()> {
     let source = fs::read(opf_path)?;
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
@@ -429,9 +500,37 @@ pub(crate) fn update_opf_metadata(opf_path: &Path, model: &str) -> Result<()> {
     let mut buf = Vec::new();
     let mut in_language = false;
     let mut wrote_contributor = false;
+    let mut package_version = None;
+    let mut has_fixed_layout = false;
+    let mut has_original_resolution = false;
+    let mut has_orientation_lock = false;
 
     loop {
         match reader.read_event_into(&mut buf)? {
+            Event::Start(e) if local_name(e.name().as_ref()) == b"package" => {
+                package_version = attr_value(&e, reader.decoder(), b"version")?;
+                writer.write_event(Event::Start(e.into_owned()))?;
+            }
+            Event::Empty(e) if local_name(e.name().as_ref()) == b"meta" => {
+                update_fixed_layout_flags(
+                    &e,
+                    reader.decoder(),
+                    &mut has_fixed_layout,
+                    &mut has_original_resolution,
+                    &mut has_orientation_lock,
+                )?;
+                writer.write_event(Event::Empty(e.into_owned()))?;
+            }
+            Event::Start(e) if local_name(e.name().as_ref()) == b"meta" => {
+                update_fixed_layout_flags(
+                    &e,
+                    reader.decoder(),
+                    &mut has_fixed_layout,
+                    &mut has_original_resolution,
+                    &mut has_orientation_lock,
+                )?;
+                writer.write_event(Event::Start(e.into_owned()))?;
+            }
             Event::Start(e) if local_name(e.name().as_ref()) == b"language" => {
                 in_language = true;
                 writer.write_event(Event::Start(e.into_owned()))?;
@@ -444,21 +543,17 @@ pub(crate) fn update_opf_metadata(opf_path: &Path, model: &str) -> Result<()> {
                 writer.write_event(Event::End(e.into_owned()))?;
             }
             Event::End(e) if local_name(e.name().as_ref()) == b"metadata" => {
+                if let Some(metadata) = kindle_fixed_layout {
+                    write_kindle_fixed_layout_metadata(
+                        &mut writer,
+                        metadata,
+                        &mut has_fixed_layout,
+                        &mut has_original_resolution,
+                        &mut has_orientation_lock,
+                    )?;
+                }
                 if !wrote_contributor {
-                    let mut contributor = BytesStart::new("dc:contributor");
-                    contributor.push_attribute(("id", "epubicus-translator"));
-                    writer.write_event(Event::Start(contributor))?;
-                    writer.write_event(Event::Text(
-                        BytesText::new(&format!("epubicus (model: {model})")).into_owned(),
-                    ))?;
-                    writer.write_event(Event::End(BytesEnd::new("dc:contributor")))?;
-                    let mut role = BytesStart::new("meta");
-                    role.push_attribute(("refines", "#epubicus-translator"));
-                    role.push_attribute(("property", "role"));
-                    role.push_attribute(("scheme", "marc:relators"));
-                    writer.write_event(Event::Start(role))?;
-                    writer.write_event(Event::Text(BytesText::new("trl").into_owned()))?;
-                    writer.write_event(Event::End(BytesEnd::new("meta")))?;
+                    write_translator_contributor(&mut writer, model, package_version.as_deref())?;
                     wrote_contributor = true;
                 }
                 writer.write_event(Event::End(e.into_owned()))?;
@@ -470,6 +565,164 @@ pub(crate) fn update_opf_metadata(opf_path: &Path, model: &str) -> Result<()> {
     }
     fs::write(opf_path, writer.into_inner())?;
     Ok(())
+}
+
+fn update_fixed_layout_flags(
+    e: &BytesStart<'_>,
+    decoder: quick_xml::encoding::Decoder,
+    has_fixed_layout: &mut bool,
+    has_original_resolution: &mut bool,
+    has_orientation_lock: &mut bool,
+) -> Result<()> {
+    let name = attr_value(e, decoder, b"name")?;
+    let property = attr_value(e, decoder, b"property")?;
+    if name.as_deref() == Some("fixed-layout") || property.as_deref() == Some("rendition:layout") {
+        *has_fixed_layout = true;
+    }
+    if name.as_deref() == Some("original-resolution") {
+        *has_original_resolution = true;
+    }
+    if name.as_deref() == Some("orientation-lock")
+        || property.as_deref() == Some("rendition:orientation")
+    {
+        *has_orientation_lock = true;
+    }
+    Ok(())
+}
+
+fn write_kindle_fixed_layout_metadata(
+    writer: &mut Writer<Vec<u8>>,
+    metadata: &KindleFixedLayoutMetadata,
+    has_fixed_layout: &mut bool,
+    has_original_resolution: &mut bool,
+    has_orientation_lock: &mut bool,
+) -> Result<()> {
+    if !*has_fixed_layout {
+        write_empty_meta(writer, &[("name", "fixed-layout"), ("content", "true")])?;
+        *has_fixed_layout = true;
+    }
+    if !*has_original_resolution {
+        let original_resolution = metadata.original_resolution();
+        write_empty_meta(
+            writer,
+            &[
+                ("name", "original-resolution"),
+                ("content", original_resolution.as_str()),
+            ],
+        )?;
+        *has_original_resolution = true;
+    }
+    if !*has_orientation_lock {
+        write_empty_meta(
+            writer,
+            &[
+                ("name", "orientation-lock"),
+                ("content", metadata.orientation_lock()),
+            ],
+        )?;
+        *has_orientation_lock = true;
+    }
+    Ok(())
+}
+
+fn write_empty_meta(writer: &mut Writer<Vec<u8>>, attrs: &[(&str, &str)]) -> Result<()> {
+    let mut meta = BytesStart::new("meta");
+    for attr in attrs {
+        meta.push_attribute(*attr);
+    }
+    writer.write_event(Event::Empty(meta))?;
+    Ok(())
+}
+
+fn write_translator_contributor(
+    writer: &mut Writer<Vec<u8>>,
+    model: &str,
+    package_version: Option<&str>,
+) -> Result<()> {
+    let mut contributor = BytesStart::new("dc:contributor");
+    contributor.push_attribute(("id", "epubicus-translator"));
+    if package_version
+        .map(|version| version.starts_with('2'))
+        .unwrap_or(false)
+    {
+        contributor.push_attribute(("opf:role", "trl"));
+    }
+    writer.write_event(Event::Start(contributor))?;
+    writer.write_event(Event::Text(
+        BytesText::new(&format!("epubicus (model: {model})")).into_owned(),
+    ))?;
+    writer.write_event(Event::End(BytesEnd::new("dc:contributor")))?;
+
+    if !package_version
+        .map(|version| version.starts_with('2'))
+        .unwrap_or(false)
+    {
+        let mut role = BytesStart::new("meta");
+        role.push_attribute(("refines", "#epubicus-translator"));
+        role.push_attribute(("property", "role"));
+        role.push_attribute(("scheme", "marc:relators"));
+        writer.write_event(Event::Start(role))?;
+        writer.write_event(Event::Text(BytesText::new("trl").into_owned()))?;
+        writer.write_event(Event::End(BytesEnd::new("meta")))?;
+    }
+    Ok(())
+}
+
+fn read_xhtml_viewport(path: &Path) -> Result<Option<String>> {
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    xhtml_viewport_from_str(&source)
+}
+
+fn xhtml_viewport_from_str(source: &str) -> Result<Option<String>> {
+    let mut reader = Reader::from_reader(Cursor::new(source));
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf)? {
+            Event::Empty(e) | Event::Start(e) if local_name(e.name().as_ref()) == b"meta" => {
+                if attr_value(&e, reader.decoder(), b"name")?.as_deref() == Some("viewport") {
+                    return attr_value(&e, reader.decoder(), b"content");
+                }
+            }
+            Event::Start(e) if local_name(e.name().as_ref()) == b"body" => return Ok(None),
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(None)
+}
+
+fn has_fixed_layout_page_evidence(source: &str) -> bool {
+    source.contains("data-app-amzn-magnify")
+        || source.contains("target-mag")
+        || source.contains("class=\"contain")
+        || source.contains("id=\"pg")
+        || source.contains("position:absolute")
+        || source.contains("position: absolute")
+}
+
+fn parse_viewport_resolution(content: &str) -> Option<KindleFixedLayoutMetadata> {
+    let mut width = None;
+    let mut height = None;
+    for part in content.split([',', ';']) {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let Some(value) = value.trim().trim_end_matches("px").parse::<u32>().ok() else {
+            continue;
+        };
+        match key.trim() {
+            "width" => width = Some(value),
+            "height" => height = Some(value),
+            _ => {}
+        }
+    }
+    Some(KindleFixedLayoutMetadata {
+        width: width?,
+        height: height?,
+    })
 }
 
 pub(crate) fn pack_epub(root: &Path, output: &Path) -> Result<()> {
@@ -562,4 +815,103 @@ pub(crate) fn is_never_translate_tag(name: &[u8]) -> bool {
         local_name(name),
         b"code" | b"pre" | b"kbd" | b"samp" | b"var" | b"tt" | b"script" | b"style" | b"math"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_opf_metadata_uses_epub2_contributor_role() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let opf = dir.path().join("content.opf");
+        fs::write(
+            &opf,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:language>en</dc:language>
+  </metadata>
+</package>"#,
+        )?;
+
+        update_opf_metadata(&opf, "model-a", None)?;
+        let updated = fs::read_to_string(opf)?;
+
+        assert!(updated.contains("<dc:language>ja</dc:language>"));
+        assert!(updated.contains(r#"opf:role="trl""#));
+        assert!(!updated.contains(r##"refines="#epubicus-translator""##));
+        Ok(())
+    }
+
+    #[test]
+    fn update_opf_metadata_keeps_epub3_refines_role() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let opf = dir.path().join("content.opf");
+        fs::write(
+            &opf,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:language>en</dc:language>
+  </metadata>
+</package>"#,
+        )?;
+
+        update_opf_metadata(&opf, "model-a", None)?;
+        let updated = fs::read_to_string(opf)?;
+
+        assert!(updated.contains(r##"refines="#epubicus-translator""##));
+        assert!(updated.contains(r#"property="role""#));
+        assert!(!updated.contains(r#"opf:role="trl""#));
+        Ok(())
+    }
+
+    #[test]
+    fn update_opf_metadata_adds_kindle_fixed_layout_metadata() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let opf = dir.path().join("content.opf");
+        fs::write(
+            &opf,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:language>en</dc:language>
+  </metadata>
+</package>"#,
+        )?;
+
+        let metadata = KindleFixedLayoutMetadata {
+            width: 1208,
+            height: 1213,
+        };
+        update_opf_metadata(&opf, "model-a", Some(&metadata))?;
+        let updated = fs::read_to_string(opf)?;
+
+        assert!(updated.contains(r#"name="fixed-layout" content="true""#));
+        assert!(updated.contains(r#"name="original-resolution" content="1208x1213""#));
+        assert!(updated.contains(r#"name="orientation-lock" content="portrait""#));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_viewport_resolution_reads_width_and_height() {
+        assert_eq!(
+            parse_viewport_resolution("width=1208, height=1213"),
+            Some(KindleFixedLayoutMetadata {
+                width: 1208,
+                height: 1213
+            })
+        );
+    }
+
+    #[test]
+    fn fixed_layout_page_evidence_detects_positioned_page_markup() {
+        assert!(has_fixed_layout_page_evidence(
+            r#"<div id="pg1" class="contain1"></div>"#
+        ));
+        assert!(has_fixed_layout_page_evidence(
+            r#"<a data-app-amzn-magnify="{}"></a>"#
+        ));
+        assert!(!has_fixed_layout_page_evidence(
+            r#"<body><p>Ordinary reflowable text.</p></body>"#
+        ));
+    }
 }

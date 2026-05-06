@@ -140,11 +140,7 @@ fn is_stale_lock(metadata: &LockMetadata) -> bool {
     let Some(process) = process_snapshot(pid) else {
         return true;
     };
-    if let Some(created_at) = metadata
-        .created_at
-        .as_deref()
-        .and_then(parse_rfc3339_utc)
-    {
+    if let Some(created_at) = metadata.created_at.as_deref().and_then(parse_rfc3339_utc) {
         if process.started_at > created_at + chrono::TimeDelta::seconds(2) {
             return true;
         }
@@ -152,7 +148,10 @@ fn is_stale_lock(metadata: &LockMetadata) -> bool {
     if let Some(command) = metadata.command.as_deref() {
         let command = command.to_ascii_lowercase();
         if command.contains("epubicus")
-            && !process.command_line.to_ascii_lowercase().contains("epubicus")
+            && !process
+                .command_line
+                .to_ascii_lowercase()
+                .contains("epubicus")
         {
             return true;
         }

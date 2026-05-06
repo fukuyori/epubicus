@@ -158,6 +158,7 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 fn suggested_action(reason: &str) -> String {
     match reason {
         "cache_miss" => "translate_uncached".to_string(),
+        "invalid_cached_translation" => "retry_translation".to_string(),
         "inline_restore_failed" => "retry_translation_or_inspect_inline".to_string(),
         "unchanged_source" | "detected_untranslated_output" => "retry_translation".to_string(),
         "validation_passthrough" | "original_output" => "retry_translation".to_string(),

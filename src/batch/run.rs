@@ -48,8 +48,11 @@ pub(super) fn batch_run(args: BatchRunArgs) -> Result<()> {
         println!("Batch run step: submit skipped; remote batch id is already recorded");
     }
 
-    let manifest =
-        with_batch_run_error_summary(wait_for_fetchable_status(&args, &manifest_path), &manifest_path, run_started)?;
+    let manifest = with_batch_run_error_summary(
+        wait_for_fetchable_status(&args, &manifest_path),
+        &manifest_path,
+        run_started,
+    )?;
     if !is_fetchable_status(&manifest.status) {
         let total_elapsed_secs = finish_batch_manifest_run(&manifest_path)?
             .unwrap_or_else(|| run_started.elapsed().as_secs());
@@ -157,7 +160,9 @@ fn batch_run_error_summary(manifest_path: &Path, started: Instant) -> String {
     let elapsed = format_duration_hms(started.elapsed());
     let total_active = format_duration_hms(Duration::from_secs(total_active_elapsed_secs));
     let Ok(manifest) = read_json_file::<BatchManifest>(manifest_path) else {
-        return format!("Batch run summary at error: elapsed {elapsed} | total active {total_active}");
+        return format!(
+            "Batch run summary at error: elapsed {elapsed} | total active {total_active}"
+        );
     };
     let work_items_path = manifest_path
         .parent()
@@ -303,10 +308,7 @@ fn elapsed_secs_between(started_at: &str, finished_at: &str) -> u64 {
     let Ok(finished) = chrono::DateTime::parse_from_rfc3339(finished_at) else {
         return 0;
     };
-    finished
-        .signed_duration_since(started)
-        .num_seconds()
-        .max(0) as u64
+    finished.signed_duration_since(started).num_seconds().max(0) as u64
 }
 
 fn is_fetchable_status(status: &str) -> bool {
@@ -507,8 +509,7 @@ mod tests {
             failed_count: 1,
         });
 
-        let message =
-            batch_wait_status_message(&manifest, 3, Duration::from_secs(65), Some(30));
+        let message = batch_wait_status_message(&manifest, 3, Duration::from_secs(65), Some(30));
 
         assert!(message.contains("poll #3"));
         assert!(message.contains("elapsed 00:01:05"));

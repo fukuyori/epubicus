@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration, time::Instant};
+use std::{time::Duration, time::Instant};
 
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -19,6 +19,7 @@ pub(crate) struct ProgressReporter {
     eta_measure_page: bool,
     page_message: String,
     work_message: Option<String>,
+    recoverable_errors: u64,
 }
 
 impl ProgressReporter {
@@ -52,24 +53,21 @@ impl ProgressReporter {
                 "preparing".to_string()
             },
             work_message: None,
+            recoverable_errors: 0,
         };
         reporter.refresh_message();
         Ok(reporter)
     }
 
-    pub(crate) fn set_page(&mut self, page_no: usize, total_pages: usize, href: &str) {
+    pub(crate) fn set_page(&mut self, page_no: usize, total_pages: usize) {
         self.eta_measure_page = should_measure_eta_page(page_no);
-        let name = Path::new(href)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(href);
         self.page_message = if self.cached_blocks > 0 {
             format!(
-                "c{}/{} p{page_no}/{total_pages} {name}",
+                "c{}/{} p{page_no}/{total_pages}",
                 self.cached_blocks, self.total_blocks
             )
         } else {
-            format!("p{page_no}/{total_pages} {name}")
+            format!("p{page_no}/{total_pages}")
         };
         self.work_message = None;
         self.refresh_message();
@@ -117,6 +115,11 @@ impl ProgressReporter {
         self.refresh_message();
     }
 
+    pub(crate) fn inc_recoverable_error(&mut self) {
+        self.recoverable_errors += 1;
+        self.refresh_message();
+    }
+
     pub(crate) fn finish(self, stats: &Stats) {
         self.bar.finish_with_message(format!(
             "done: {} pages, {} blocks",
@@ -129,6 +132,10 @@ impl ProgressReporter {
         if let Some(work_message) = &self.work_message {
             message.push_str(" | ");
             message.push_str(work_message);
+        }
+        if self.recoverable_errors > 0 {
+            message.push_str(" | recoverable ");
+            message.push_str(&self.recoverable_errors.to_string());
         }
         self.bar.set_message(message);
     }
@@ -232,7 +239,7 @@ mod tests {
     #[test]
     fn eta_message_stays_pending_until_sample_is_ready() {
         let mut progress = ProgressReporter::new(100, 0, 100_000).unwrap();
-        progress.set_page(4, 100, "chapter.xhtml");
+        progress.set_page(4, 100);
         progress.model_started = Some(Instant::now() - Duration::from_secs(5 * 60 - 1));
         progress.model_chars = 10_000;
         assert_eq!(progress.eta_message(), "ETA pending");
@@ -244,14 +251,14 @@ mod tests {
     #[test]
     fn eta_ignores_first_three_spine_pages() {
         let mut progress = ProgressReporter::new(100, 0, 10_000).unwrap();
-        progress.set_page(3, 100, "front.xhtml");
+        progress.set_page(3, 100);
         progress.set_provider_batch(0, 1, 1);
         progress.complete_provider_block(1, 1, 1, 5_000);
 
         assert!(progress.model_started.is_none());
         assert_eq!(progress.model_chars, 0);
 
-        progress.set_page(4, 100, "body.xhtml");
+        progress.set_page(4, 100);
         progress.set_provider_batch(0, 1, 1);
         assert!(progress.model_started.is_some());
         progress.complete_provider_block(1, 1, 1, 5_000);
@@ -267,7 +274,7 @@ mod tests {
     #[test]
     fn eta_uses_uncached_chars_from_current_run() {
         let mut progress = ProgressReporter::new(7_810, 4_998, 100_000).unwrap();
-        progress.set_page(4, 28, "body.xhtml");
+        progress.set_page(4, 28);
         progress.set_provider_batch(0, 2_812, 1);
         progress.model_started = Some(Instant::now() - Duration::from_secs(14 * 60 * 60));
         progress.model_chars = 90_000;

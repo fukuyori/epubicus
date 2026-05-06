@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     cache::CacheRecord,
     translator::{
@@ -11,6 +10,7 @@ use crate::{
         validation_failure_reason,
     },
 };
+use indicatif::{ProgressBar, ProgressStyle};
 
 const LOCAL_STALL_ABORT_ELAPSED: Duration = Duration::from_secs(10 * 60);
 const LOCAL_STALL_ABORT_REQUESTS: u64 = 20;
@@ -37,9 +37,7 @@ pub(super) fn batch_translate_local(args: BatchTranslateLocalArgs) -> Result<()>
         summary.failed_count,
         summary.total_count,
         super::run::format_duration_hms(summary.run_elapsed),
-        super::run::format_duration_hms(Duration::from_secs(
-            summary.total_active_elapsed_secs
-        )),
+        super::run::format_duration_hms(Duration::from_secs(summary.total_active_elapsed_secs)),
         summary.batch_dir.display()
     );
     Ok(())
@@ -202,12 +200,7 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
                 );
                 item.updated_at = chrono::Utc::now().to_rfc3339();
                 failed_count += 1;
-                (
-                    item.page_index,
-                    item.block_index,
-                    item.href.clone(),
-                    None,
-                )
+                (item.page_index, item.block_index, item.href.clone(), None)
             } else if translator.cache.peek(&item.cache_key).is_some() {
                 item.state = "local_imported".to_string();
                 item.last_error = None;
@@ -259,7 +252,12 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
                                 item.page_index, item.block_index, item.href
                             )
                         });
-                        (item.page_index, item.block_index, item.href.clone(), abort_error)
+                        (
+                            item.page_index,
+                            item.block_index,
+                            item.href.clone(),
+                            abort_error,
+                        )
                     }
                 }
             }
@@ -563,9 +561,7 @@ fn suggested_action_for_local_batch_error(
         return "batch_retry_requests_or_try_another_provider";
     }
     match validation_failure_reason(err) {
-        Some(ValidationFailureReason::MissingPlaceholder) => {
-            "retry_translation_or_inspect_inline"
-        }
+        Some(ValidationFailureReason::MissingPlaceholder) => "retry_translation_or_inspect_inline",
         Some(ValidationFailureReason::UntranslatedSegment)
             if matches!(
                 classify_untranslated_segment_for_local_batch(err, source_text),
@@ -778,11 +774,9 @@ mod tests {
 
     #[test]
     fn non_retryable_validation_exhausts_local_batch_item() {
-        let err = crate::translator::validate_translation_response(
-            "before ⟦S1⟧ after",
-            "before after",
-        )
-        .unwrap_err();
+        let err =
+            crate::translator::validate_translation_response("before ⟦S1⟧ after", "before after")
+                .unwrap_err();
         assert!(should_exhaust_local_batch_error(
             &err,
             "before ⟦S1⟧ after",
@@ -828,8 +822,7 @@ mod tests {
 
     #[test]
     fn reference_like_untranslated_segment_is_exhausted() {
-        let source =
-            "⟦E1⟧6⟦/E1⟧. Michael Lierow, Sebastian Jannsen, and Joris D’Inca, “Amazon Is Using Logistics to Lead a Retail Revolution,” ⟦E2⟧Forbes⟦/E2⟧ (February 21, 2016), ⟦E3⟧https://www.forbes.com/example⟦/E3⟧";
+        let source = "⟦E1⟧6⟦/E1⟧. Michael Lierow, Sebastian Jannsen, and Joris D’Inca, “Amazon Is Using Logistics to Lead a Retail Revolution,” ⟦E2⟧Forbes⟦/E2⟧ (February 21, 2016), ⟦E3⟧https://www.forbes.com/example⟦/E3⟧";
         let err = crate::translator::validate_translation_response(source, source).unwrap_err();
         assert!(should_exhaust_local_batch_error(
             &err,
@@ -843,9 +836,7 @@ mod tests {
             crate::usage::ApiUsage::default(),
             crate::usage::ApiUsage::default(),
         );
-        assert!(text.contains(
-            "suggested_action=inspect_reference_or_try_another_provider"
-        ));
+        assert!(text.contains("suggested_action=inspect_reference_or_try_another_provider"));
     }
 
     fn test_work_item(state: &str) -> WorkItem {

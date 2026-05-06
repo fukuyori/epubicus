@@ -2,6 +2,32 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.4.2 - 2026-05-06
+
+### Added
+
+- Added DeepSeek helper scripts for inspection, usage checks, trial translation, full conversion, cache rebuild, recovery, scan recovery, and manual cache recovery.
+- Added DeepSeek API provider support through the Anthropic-compatible messages API.
+- Added manual recovery JSON support so selected recovery items can be written directly into the translation cache without another provider call.
+- Added a Mermaid recovery flow diagram to the Japanese README.
+- Added documentation for script-first DeepSeek workflows, novel style options, direct cache/manual recovery, and recovery reason filters.
+
+### Changed
+
+- `convert-deepseek.ps1` now passes through extra `translate` options such as `--style novel` and `--style novel-polite`.
+- Recovery progress now reports updated, failed, cached, and retry counts without streaming detailed per-item messages unless `--verbose` is used.
+- Translation progress now hides internal XHTML filenames and shows recoverable-output counts as a running total.
+- Request retry and validation retry are now controlled separately with `--retries` and `--validation-retries`.
+- Recovery now removes successfully handled records from `recovery.jsonl`, so interrupted recovery runs keep completed work.
+- Recovery summaries now include per-reason counts for updated, already-valid, and unrecoverable items.
+
+### Fixed
+
+- Placeholder-preserving recovery now falls back to a normal validation retry if segment-level recovery cannot translate any text.
+- Safe structural passthrough handling now avoids repeated provider retries for hard reference-like content such as URLs, email addresses, identifiers, code-like snippets, and reference/index entries.
+- Cache replacement during recovery now updates existing invalid entries instead of leaving stale invalid translations in place.
+- Kindle fixed-layout metadata can now be applied automatically for fixed-layout-like EPUBs, with script controls for `auto`, `fixed`, and `reflow`.
+
 ## 0.4.1 - 2026-05-04
 
 ### Added

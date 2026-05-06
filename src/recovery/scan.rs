@@ -126,6 +126,7 @@ fn recover_args_for_scan(args: &ScanRecoveryArgs, log: std::path::PathBuf) -> Re
         block: None,
         reasons: Vec::new(),
         failed_log: args.failed_log.clone(),
+        manual: None,
         rebuild: args.rebuild,
         output: args.rebuild.then(|| args.output.clone()),
         common: args.common.clone(),
@@ -163,6 +164,9 @@ fn collect_blocks_from_bytes(source: &[u8]) -> Result<Vec<String>> {
 
 fn suspicious_output<'a>(source: &'a str, output: &'a str) -> Option<(&'static str, String)> {
     if crate::collapse_ws(source) == crate::collapse_ws(output) {
+        if crate::translator::is_structural_passthrough_source(source) {
+            return None;
+        }
         return Some((
             "unchanged_source",
             "output block is unchanged source text".to_string(),
@@ -207,6 +211,12 @@ mod tests {
         let result = suspicious_output("Hello world.", "Hello world.").unwrap();
 
         assert_eq!(result.0, "unchanged_source");
+    }
+
+    #[test]
+    fn suspicious_output_accepts_structural_passthrough_source() {
+        let source = "DOI: ⟦E1⟧https://doi.org/10.7208/example⟦/E1⟧";
+        assert!(suspicious_output(source, source).is_none());
     }
 
     #[test]
@@ -263,6 +273,7 @@ mod tests {
             num_ctx: 8192,
             timeout_secs: 900,
             retries: 3,
+            validation_retries: 1,
             max_chars_per_request: DEFAULT_MAX_CHARS_PER_REQUEST,
             concurrency: DEFAULT_CONCURRENCY,
             style: "essay".to_string(),
@@ -274,6 +285,8 @@ mod tests {
             keep_cache: true,
             usage_only: false,
             partial_from_cache: false,
+            kindle_fixed_layout: false,
+            no_kindle_fixed_layout: false,
             passthrough_on_validation_failure: false,
             verbose: false,
         }
