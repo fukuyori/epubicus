@@ -10,6 +10,8 @@
 #   .\scripts\recover-from-cache.ps1 .\book.epub
 #   .\scripts\recover-from-cache.ps1 .\book.epub -CacheRoot .\.local-ollama-cache
 #   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
+#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Concurrency 2
+#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -DevBuild -NoRun
 #   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -NoRun
 
 param(
@@ -20,6 +22,8 @@ param(
     [string]$Provider = "ollama",
 
     [string]$Model,
+
+    [int]$Concurrency = 0,
 
     [string]$CacheRoot,
 
@@ -45,7 +49,7 @@ param(
 
     [switch]$List,
 
-    [string]$EpubicusExe,
+    [switch]$DevBuild,
 
     [switch]$NoRun
 )
@@ -63,14 +67,7 @@ if ([string]::IsNullOrWhiteSpace($InputPath)) {
 $InputEpub = (Resolve-Path -LiteralPath $InputPath).Path
 $inputDir = Split-Path -Parent $InputEpub
 $inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($InputEpub)
-
-function Resolve-EpubicusExe {
-    param([string]$Preferred)
-    if (-not [string]::IsNullOrWhiteSpace($Preferred)) {
-        return (Resolve-Path -LiteralPath $Preferred).Path
-    }
-    return $null
-}
+$inputExtension = [System.IO.Path]::GetExtension($InputEpub)
 
 function Resolve-CacheRoot {
     param([string]$Path)
@@ -118,6 +115,9 @@ $args = @(
 if (-not [string]::IsNullOrWhiteSpace($ResolvedCacheRoot)) {
     $args += @("--cache-root", $ResolvedCacheRoot)
 }
+if ($Concurrency -gt 0) {
+    $args += @("--concurrency", "$Concurrency")
+}
 if ($Limit -gt 0) {
     $args += @("--limit", "$Limit")
 }
@@ -153,35 +153,37 @@ if ($NoKindleFixedLayout) {
     $args += "--no-kindle-fixed-layout"
 }
 
-$exe = Resolve-EpubicusExe $EpubicusExe
+$OutputEpub = if (-not [string]::IsNullOrWhiteSpace($Output)) {
+    $Output
+} else {
+    Join-Path $inputDir "$inputBaseName`_jp$inputExtension"
+}
 
 Write-Host ""
-Write-Host "InputEpub = $InputEpub"
-if (-not [string]::IsNullOrWhiteSpace($ResolvedCacheRoot)) {
-    Write-Host "CacheRoot = $ResolvedCacheRoot"
-} else {
-    Write-Host "CacheRoot = OS default"
+Write-Host "InputEpub  = $InputEpub"
+if (-not $List -and -not $NoRebuild) {
+    Write-Host "OutputEpub = $OutputEpub"
 }
-Write-Host "Provider  = $Provider"
-Write-Host "Model     = $Model"
+if (-not [string]::IsNullOrWhiteSpace($ResolvedCacheRoot)) {
+    Write-Host "CacheRoot  = $ResolvedCacheRoot"
+} else {
+    Write-Host "CacheRoot  = OS default"
+}
+Write-Host "Model      = $Model"
 if (-not [string]::IsNullOrWhiteSpace($GlossaryPath)) {
-    Write-Host "Glossary  = $GlossaryPath"
+    Write-Host "Glossary   = $GlossaryPath"
 }
 if (-not [string]::IsNullOrWhiteSpace($ManualPath)) {
-    Write-Host "Manual    = $ManualPath"
+    Write-Host "Manual     = $ManualPath"
 }
 Write-Host ""
 
-if ($null -ne $exe) {
-    Write-Host "$exe $($args -join ' ')"
-    if (-not $NoRun) {
-        & $exe @args
-        exit $LASTEXITCODE
+Write-Host "Recovery:"
+if (-not $NoRun) {
+    if ($DevBuild) {
+        cargo run --quiet -- @args
+    } else {
+        cargo run --release --quiet -- @args
     }
-} else {
-    Write-Host "cargo run --release -- $($args -join ' ')"
-    if (-not $NoRun) {
-        cargo run --release -- @args
-        exit $LASTEXITCODE
-    }
+    exit $LASTEXITCODE
 }

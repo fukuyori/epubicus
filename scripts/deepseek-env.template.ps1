@@ -19,7 +19,10 @@
 #
 #   Or load it without running:
 #     . .\scripts\deepseek-env.ps1 .\test\sample.epub -NoRun
-#     Invoke-EpubicusDeepSeek
+#     Invoke-EpubicusTranslate
+#
+#   Use Cargo dev profile for script/debug checks:
+#     .\scripts\deepseek-env.ps1 .\test\sample.epub -DevBuild -NoRun
 
 param(
     [Parameter(Position = 0)]
@@ -42,6 +45,8 @@ param(
     [switch]$KindleFixedLayout,
 
     [switch]$NoKindleFixedLayout,
+
+    [switch]$DevBuild,
 
     [switch]$NoRun,
 
@@ -140,18 +145,25 @@ function Show-EpubicusDeepSeekCommands {
         Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
     }
     Write-Host ""
-    Write-Host "Normal DeepSeek conversion:"
-    Write-Host "Invoke-EpubicusDeepSeek"
-    Write-Host "cargo run --release -- $((New-EpubicusDeepSeekArgs) -join ' ')"
+    Write-Host "Normal conversion:"
+    Write-Host "Invoke-EpubicusTranslate"
     Write-Host ""
 }
 
+function Invoke-EpubicusTranslate {
+    if ($DevBuild) {
+        cargo run --quiet -- @(New-EpubicusDeepSeekArgs)
+    } else {
+        cargo run --release --quiet -- @(New-EpubicusDeepSeekArgs)
+    }
+}
+
 function Invoke-EpubicusDeepSeek {
-    cargo run --release -- @(New-EpubicusDeepSeekArgs)
+    Invoke-EpubicusTranslate
 }
 
 Show-EpubicusDeepSeekCommands
 
 if (-not $NoRun) {
-    Invoke-EpubicusDeepSeek
+    Invoke-EpubicusTranslate
 }

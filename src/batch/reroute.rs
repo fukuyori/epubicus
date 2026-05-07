@@ -143,6 +143,9 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
     }
 
     let _run_lock = acquire_input_run_lock(&args.input, "translate local batch input EPUB")?;
+    let source_language = unpack_epub(&args.input)
+        .ok()
+        .and_then(|book| book.source_language);
     let cache = CacheStore::from_args(&args.input, &args.common)?;
     let batch_dir = cache.dir.join(BATCH_DIR);
     let batch_lock_path = batch_lock_path(&cache);
@@ -154,7 +157,7 @@ fn translate_local_items(args: BatchTranslateLocalArgs) -> Result<TranslateLocal
     let mut manifest: BatchManifest = read_json_file(&manifest_path)?;
     let mut work_items: Vec<WorkItem> = read_jsonl_file(&work_items_path)?;
     let total_count = work_items.len();
-    let mut translator = Translator::new(args.common, cache)?;
+    let mut translator = Translator::new_with_source_language(args.common, cache, source_language)?;
     let mut translated_count = 0usize;
     let mut cached_count = 0usize;
     let mut failed_count = 0usize;

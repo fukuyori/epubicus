@@ -26,9 +26,8 @@ function Invoke-EpubicusStep {
     )
     Write-Host ""
     Write-Host "[$Name]"
-    Write-Host "cargo run --release -- $($StepArgs -join ' ')"
     if (-not $NoRun) {
-        cargo run --release -- @StepArgs
+        cargo run --release --quiet -- @StepArgs
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }

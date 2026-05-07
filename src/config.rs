@@ -20,7 +20,7 @@ pub(crate) const DEFAULT_BATCH_MAX_BYTES_PER_FILE: usize = 200_000_000;
 #[command(name = "epubicus")]
 #[command(version)]
 #[command(
-    about = "Translate English EPUB files to Japanese with Ollama, OpenAI, Claude, or DeepSeek"
+    about = "Translate EPUB files from multiple source languages to Japanese with Ollama, OpenAI, Claude, or DeepSeek"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]

@@ -2,6 +2,20 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.4.3 - 2026-05-08
+
+### Added
+
+- Added EPUB metadata-based source language detection for glossary generation and translation prompts.
+- Added multilingual source support while keeping the translation target fixed to Japanese.
+- Added a `-DevBuild` option to `create-glossary.ps1` for debug-build glossary checks.
+
+### Changed
+
+- Translation prompts now use the EPUB source language hint when available and fall back to automatic source-language detection.
+- Glossary output now records the detected source language instead of assuming English.
+- Validation now treats unchanged non-Japanese source text as untranslated across multilingual inputs.
+
 ## 0.4.2 - 2026-05-06
 
 ### Added

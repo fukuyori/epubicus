@@ -23,6 +23,7 @@ use crate::collapse_ws;
 pub(crate) struct EpubBook {
     pub(crate) work_dir: TempDir,
     pub(crate) opf_path: PathBuf,
+    pub(crate) source_language: Option<String>,
     pub(crate) manifest: Vec<ManifestItem>,
     pub(crate) spine: Vec<SpineItem>,
 }
@@ -68,6 +69,7 @@ pub(crate) fn unpack_epub(input: &Path) -> Result<EpubBook> {
     Ok(EpubBook {
         work_dir,
         opf_path,
+        source_language: opf.source_language,
         manifest: opf.manifest,
         spine: opf.spine,
     })
@@ -99,6 +101,7 @@ fn read_container_rootfile(container_path: &Path) -> Result<String> {
 }
 
 struct OpfData {
+    pub(crate) source_language: Option<String>,
     pub(crate) manifest: Vec<ManifestItem>,
     spine: Vec<SpineItem>,
 }
@@ -110,9 +113,23 @@ fn read_opf(opf_path: &Path, opf_dir: &Path) -> Result<OpfData> {
     let mut buf = Vec::new();
     let mut manifest = Vec::new();
     let mut idrefs = Vec::new();
+    let mut in_language = false;
+    let mut source_language = None;
 
     loop {
         match reader.read_event_into(&mut buf)? {
+            Event::Start(e) if local_name(e.name().as_ref()) == b"language" => {
+                in_language = true;
+            }
+            Event::Text(t) if in_language && source_language.is_none() => {
+                let language = t.decode()?.trim().to_string();
+                if !language.is_empty() {
+                    source_language = Some(language);
+                }
+            }
+            Event::End(e) if local_name(e.name().as_ref()) == b"language" => {
+                in_language = false;
+            }
             Event::Start(e) | Event::Empty(e) if local_name(e.name().as_ref()) == b"item" => {
                 let mut id = None;
                 let mut href = None;
@@ -190,7 +207,11 @@ fn read_opf(opf_path: &Path, opf_dir: &Path) -> Result<OpfData> {
             });
         }
     }
-    Ok(OpfData { manifest, spine })
+    Ok(OpfData {
+        source_language,
+        manifest,
+        spine,
+    })
 }
 
 pub(crate) fn count_xhtml_blocks(path: &Path) -> Result<usize> {
@@ -820,6 +841,32 @@ pub(crate) fn is_never_translate_tag(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_opf_reads_source_language() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let opf = dir.path().join("content.opf");
+        fs::write(
+            &opf,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:language>la</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+  </spine>
+</package>"#,
+        )?;
+
+        let opf_data = read_opf(&opf, dir.path())?;
+
+        assert_eq!(opf_data.source_language.as_deref(), Some("la"));
+        assert_eq!(opf_data.spine.len(), 1);
+        Ok(())
+    }
 
     #[test]
     fn update_opf_metadata_uses_epub2_contributor_role() -> Result<()> {

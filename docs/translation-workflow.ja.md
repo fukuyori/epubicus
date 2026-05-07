@@ -56,16 +56,16 @@ book.md    ChatGPT / Claude などで候補をレビューするためのプロ�
 
 `book.md` を AI に渡し、誤検出の削除、重複統合、`dst` の訳語入力を行います。翻訳時に使われるのは `src => dst` です。`dst` が空の entry は翻訳時には使われません。
 
-最小形は次の通りです。
+`source_lang` は元 EPUB の `dc:language` から自動設定されます。未設定の場合は `auto` になります。最小形は次の通りです。
 
 ```json
 {
-  "source_lang": "en",
+  "source_lang": "la",
   "target_lang": "ja",
   "entries": [
     {
-      "src": "Cognitive Warfare",
-      "dst": "認知戦"
+      "src": "Caesar",
+      "dst": "カエサル"
     }
   ]
 }

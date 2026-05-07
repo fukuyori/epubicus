@@ -16,7 +16,10 @@
 #
 #   Or load it without running:
 #     . .\scripts\openai-env.ps1 .\test\sample.epub -NoRun
-#     Invoke-EpubicusOpenAi
+#     Invoke-EpubicusTranslate
+#
+#   Use Cargo dev profile for script/debug checks:
+#     .\scripts\openai-env.ps1 .\test\sample.epub -DevBuild -NoRun
 
 param(
     [Parameter(Position = 0)]
@@ -33,6 +36,8 @@ param(
     [string[]]$ExtraArgs = @(),
 
     [switch]$UsageOnly,
+
+    [switch]$DevBuild,
 
     [switch]$NoRun,
 
@@ -73,7 +78,7 @@ $env:EPUBICUS_MAX_CHARS_PER_REQUEST = "3500"
 $env:EPUBICUS_CONCURRENCY = "$Concurrency"
 $env:EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE = "true"
 
-if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
+if ((-not $UsageOnly) -and (-not $NoRun) -and [string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
     Write-Warning "OPENAI_API_KEY is not set. Set it before running OpenAI API commands:"
     Write-Warning '$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput'
 }
@@ -115,19 +120,26 @@ function Show-EpubicusOpenAiCommands {
         Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
     }
     Write-Host ""
-    Write-Host "Normal OpenAI conversion:"
-    Write-Host "Invoke-EpubicusOpenAi"
-    Write-Host "cargo run --release -- $((New-EpubicusOpenAiArgs) -join ' ')"
+    Write-Host "Normal conversion:"
+    Write-Host "Invoke-EpubicusTranslate"
     Write-Host ""
 }
 
+function Invoke-EpubicusTranslate {
+    if ($DevBuild) {
+        cargo run --quiet -- @(New-EpubicusOpenAiArgs)
+    } else {
+        cargo run --release --quiet -- @(New-EpubicusOpenAiArgs)
+    }
+}
+
 function Invoke-EpubicusOpenAi {
-    cargo run --release -- @(New-EpubicusOpenAiArgs)
+    Invoke-EpubicusTranslate
 }
 
 Show-EpubicusOpenAiCommands
 
 if (-not $NoRun) {
-    Invoke-EpubicusOpenAi
+    Invoke-EpubicusTranslate
 }
 

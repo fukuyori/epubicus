@@ -49,6 +49,7 @@ pub(super) fn batch_prepare(args: BatchPrepareArgs) -> Result<()> {
             args.common.provider,
             &model,
             &args.common.style,
+            book.source_language.as_deref(),
             &glossary,
             true,
             &mut prepared,

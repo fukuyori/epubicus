@@ -106,7 +106,6 @@ function Invoke-Step {
     Write-Host ""
     Write-Host "[$Name]"
     if ($null -ne $script:Epubicus) {
-        Write-Host "$script:Epubicus $($StepArgs -join ' ')"
         if (-not $NoRun) {
             & $script:Epubicus @StepArgs
             if ($LASTEXITCODE -ne 0) {
@@ -118,9 +117,8 @@ function Invoke-Step {
             }
         }
     } else {
-        Write-Host "cargo run -- $($StepArgs -join ' ')"
         if (-not $NoRun) {
-            cargo run -- @StepArgs
+            cargo run --quiet -- @StepArgs
             if ($LASTEXITCODE -ne 0) {
                 if ($ContinueOnError) {
                     Write-Warning "$Name failed with exit code $LASTEXITCODE; continuing."

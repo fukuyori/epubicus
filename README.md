@@ -1,6 +1,6 @@
 # epubicus
 
-`epubicus` is a CLI tool for translating English EPUB files into Japanese while keeping the EPUB package structure and XHTML formatting intact.
+`epubicus` is a CLI tool for translating EPUB files from multiple source languages into Japanese while keeping the EPUB package structure and XHTML formatting intact.
 
 It currently supports local Ollama, OpenAI, Claude, and DeepSeek providers.
 
@@ -695,16 +695,16 @@ Send `glossary-review.md` to ChatGPT or Claude, then save the returned JSON as `
 
 `glossary-review.md` is self-contained: it includes explanatory comments, field meanings, review rules, and the candidate JSON, so it can be pasted directly into ChatGPT or Claude. `glossary.candidates.json` remains valid comment-free JSON.
 
-Edit `dst` values:
+`source_lang` is filled from the source EPUB's `dc:language` metadata. If it is missing, epubicus writes `auto`. Edit `dst` values:
 
 ```json
 {
-  "source_lang": "en",
+  "source_lang": "la",
   "target_lang": "ja",
   "entries": [
     {
-      "src": "Horizon",
-      "dst": "ホライゾン"
+      "src": "Caesar",
+      "dst": "カエサル"
     }
   ]
 }

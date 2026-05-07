@@ -9,6 +9,7 @@ pub(super) fn collect_page_work_items(
     provider: Provider,
     model: &str,
     style: &str,
+    source_language: Option<&str>,
     glossary: &[GlossaryEntry],
     skip_cached: bool,
     out: &mut Vec<PreparedItem>,
@@ -37,7 +38,7 @@ pub(super) fn collect_page_work_items(
                     {
                         continue;
                     }
-                    let system = system_prompt(style);
+                    let system = system_prompt(style, source_language);
                     let prompt = user_prompt(&source_text, &glossary_subset);
                     let custom_id = format!(
                         "epubicus:{}:p{:04}:b{:04}:{}",

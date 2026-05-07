@@ -144,7 +144,6 @@ function Show-EpubicusOpenAiBatchCommands {
     Write-Host ""
     Write-Host "Batch conversion:"
     Write-Host "Invoke-EpubicusOpenAiBatch"
-    Write-Host "cargo run --release -- batch $((New-EpubicusBatchArgs) -join ' ')"
     Write-Host ""
     Write-Host "Status:"
     Write-Host "Invoke-EpubicusOpenAiBatchStatus"
@@ -158,7 +157,7 @@ function Show-EpubicusOpenAiBatchCommands {
 }
 
 function Invoke-EpubicusOpenAiBatch {
-    cargo run --release -- batch @(New-EpubicusBatchArgs)
+    cargo run --release --quiet -- batch @(New-EpubicusBatchArgs)
     if ($LASTEXITCODE -ne 0 -and -not $NoLocalFallback) {
         Write-Warning "OpenAI Batch command exited with $LASTEXITCODE. Rerouting unfinished work to local Ollama."
         Invoke-EpubicusOpenAiBatchLocalFallback
@@ -166,15 +165,15 @@ function Invoke-EpubicusOpenAiBatch {
 }
 
 function Invoke-EpubicusOpenAiBatchStatus {
-    cargo run --release -- batch status @(New-EpubicusBatchCommonArgs)
+    cargo run --release --quiet -- batch status @(New-EpubicusBatchCommonArgs)
 }
 
 function Invoke-EpubicusOpenAiBatchVerify {
-    cargo run --release -- batch verify @(New-EpubicusBatchCommonArgs)
+    cargo run --release --quiet -- batch verify @(New-EpubicusBatchCommonArgs)
 }
 
 function Invoke-EpubicusOpenAiBatchLocalFallback {
-    cargo run --release -- batch reroute-local @(New-EpubicusBatchCommonArgs) `
+    cargo run --release --quiet -- batch reroute-local @(New-EpubicusBatchCommonArgs) `
         --provider openai `
         --model $env:EPUBICUS_MODEL `
         --remaining `
@@ -183,7 +182,7 @@ function Invoke-EpubicusOpenAiBatchLocalFallback {
         return
     }
 
-    cargo run --release -- batch translate-local @(New-EpubicusBatchCommonArgs) `
+    cargo run --release --quiet -- batch translate-local @(New-EpubicusBatchCommonArgs) `
         --provider ollama `
         --model $LocalModel `
         --limit $LocalLimit `

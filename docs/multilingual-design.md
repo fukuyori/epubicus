@@ -3,9 +3,11 @@
 Last updated: 2026-04-30
 
 This document describes how epubicus can evolve from an English-to-Japanese
-translator into a multilingual EPUB translation pipeline. The goal is to support
-both multilingual input and configurable output languages without making cache,
-Batch API, or validation behavior unsafe.
+translator into a multilingual EPUB translation pipeline. As of 0.4.3, the
+implemented direction is multilingual input with Japanese output fixed; fully
+configurable output languages remain design work. The goal is to support
+multilingual input first, and later configurable output languages, without
+making cache, Batch API, or validation behavior unsafe.
 
 ## Goals
 

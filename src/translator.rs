@@ -92,6 +92,7 @@ pub(crate) struct TranslationBackend {
     validation_retries: u32,
     pub(crate) max_chars_per_request: usize,
     pub(crate) style: String,
+    pub(crate) source_language: Option<String>,
     pub(crate) glossary: Vec<GlossaryEntry>,
     client: Client,
     api_usage: Arc<Mutex<ApiUsage>>,
@@ -219,8 +220,22 @@ struct TranslationJobResult {
     cache_translation: bool,
 }
 
+struct TranslationJobFailure {
+    job: TranslationJob,
+    err: anyhow::Error,
+}
+
 impl Translator {
+    #[allow(dead_code)]
     pub(crate) fn new(args: CommonArgs, cache: CacheStore) -> Result<Self> {
+        Self::new_with_source_language(args, cache, None)
+    }
+
+    pub(crate) fn new_with_source_language(
+        args: CommonArgs,
+        cache: CacheStore,
+        source_language: Option<String>,
+    ) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(args.timeout_secs))
             .build()
@@ -332,6 +347,7 @@ impl Translator {
                 validation_retries: args.validation_retries,
                 max_chars_per_request: args.max_chars_per_request,
                 style: args.style.clone(),
+                source_language: source_language.clone(),
                 glossary: glossary.clone(),
                 client: client.clone(),
                 api_usage: api_usage.clone(),
@@ -360,6 +376,7 @@ impl Translator {
                 validation_retries: args.validation_retries,
                 max_chars_per_request: args.max_chars_per_request,
                 style: args.style,
+                source_language,
                 glossary,
                 client,
                 api_usage,
@@ -751,13 +768,19 @@ where
         let job_count = jobs.len();
         let mut completed = 0usize;
         for job in jobs {
-            let result = run_translation_job_with_fallback(
+            let source_chars = job.source.chars().count();
+            let result = match run_translation_job_with_fallback(
                 &backend,
                 fallback_backend.as_ref(),
                 passthrough_on_validation_failure,
-                job,
-            )?;
-            let source_chars = result.source_chars;
+                job.clone(),
+            ) {
+                Ok(result) => result,
+                Err(err) if is_translation_validation_error(&err) => {
+                    validation_failure_result(&backend, job)
+                }
+                Err(err) => return Err(err),
+            };
             on_result(result)?;
             completed += 1;
             if let Some(progress) = progress.as_mut() {
@@ -772,7 +795,8 @@ where
         return Ok(());
     }
 
-    let (result_tx, result_rx) = mpsc::channel::<Result<TranslationJobResult>>();
+    let (result_tx, result_rx) =
+        mpsc::channel::<Result<TranslationJobResult, TranslationJobFailure>>();
     let job_count = jobs.len();
     thread::scope(|scope| {
         let mut worker_txs = Vec::with_capacity(concurrency);
@@ -784,12 +808,17 @@ where
             let fallback_backend = fallback_backend.clone();
             scope.spawn(move || {
                 while let Ok(job) = worker_rx.recv() {
+                    let original_job = job.clone();
                     let result = run_translation_job_with_fallback(
                         &backend,
                         fallback_backend.as_ref(),
                         passthrough_on_validation_failure,
                         job,
-                    );
+                    )
+                    .map_err(|err| TranslationJobFailure {
+                        job: original_job,
+                        err,
+                    });
                     if result_tx.send(result).is_err() {
                         break;
                     }
@@ -816,7 +845,13 @@ where
                 .recv()
                 .context("translation worker exited before sending all results")?;
             in_flight = in_flight.saturating_sub(1);
-            let result = received?;
+            let result = match received {
+                Ok(result) => result,
+                Err(failure) if is_translation_validation_error(&failure.err) => {
+                    validation_failure_result(&backend, failure.job)
+                }
+                Err(failure) => return Err(failure.err),
+            };
             let source_chars = result.source_chars;
             on_result(result)?;
             completed += 1;
@@ -839,6 +874,23 @@ where
         drop(worker_txs);
         Ok(())
     })
+}
+
+fn validation_failure_result(
+    backend: &TranslationBackend,
+    job: TranslationJob,
+) -> TranslationJobResult {
+    let source_chars = job.source.chars().count();
+    TranslationJobResult {
+        index: job.index,
+        key: job.key,
+        translated: job.source,
+        source_chars,
+        provider: backend.provider,
+        model: backend.model.clone(),
+        fallback_used: false,
+        cache_translation: false,
+    }
 }
 
 fn dispatch_translation_jobs(
@@ -1036,7 +1088,7 @@ impl TranslationBackend {
         text: &str,
         glossary_subset: &[GlossaryEntry],
     ) -> Result<String> {
-        if !is_meaningful_english(text) {
+        if !is_meaningful_translatable_source(text) {
             return Ok(text.to_string());
         }
         let leading_len = text
@@ -1102,7 +1154,7 @@ impl TranslationBackend {
         let payload = serde_json::json!({
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system_prompt(&self.style)},
+                {"role": "system", "content": system_prompt(&self.style, self.source_language.as_deref())},
                 {"role": "user", "content": user_prompt}
             ],
             "stream": false,
@@ -1128,7 +1180,7 @@ impl TranslationBackend {
         )?;
         let payload = serde_json::json!({
             "model": self.model,
-            "instructions": system_prompt(&self.style),
+            "instructions": system_prompt(&self.style, self.source_language.as_deref()),
             "input": user_prompt
         });
         let value: serde_json::Value = self.request_json_with_retry("OpenAI", || {
@@ -1149,7 +1201,7 @@ impl TranslationBackend {
             "model": self.model,
             "max_tokens": 2048,
             "temperature": self.temperature,
-            "system": system_prompt(&self.style),
+            "system": system_prompt(&self.style, self.source_language.as_deref()),
             "messages": [
                 {"role": "user", "content": user_prompt}
             ]
@@ -1186,7 +1238,7 @@ impl TranslationBackend {
             "max_tokens": 2048,
             "temperature": self.temperature,
             "thinking": {"type": "disabled"},
-            "system": system_prompt(&self.style),
+            "system": system_prompt(&self.style, self.source_language.as_deref()),
             "messages": [
                 {"role": "user", "content": user_prompt}
             ]
@@ -1461,7 +1513,7 @@ pub(crate) fn validate_translation_response(source: &str, translated: &str) -> R
     {
         return Ok(());
     }
-    if is_meaningful_english(source)
+    if is_meaningful_translatable_source(source)
         && normalize_for_comparison(source) == normalize_for_comparison(translated)
         && !looks_like_reference_number_list(source)
     {
@@ -1580,8 +1632,17 @@ fn normalize_for_comparison(text: &str) -> String {
         .collect()
 }
 
-fn is_meaningful_english(text: &str) -> bool {
-    ascii_letter_count(text) >= 6
+fn is_meaningful_translatable_source(text: &str) -> bool {
+    let visible = text_without_placeholders(text);
+    let visible = visible.trim();
+    if visible.is_empty() || looks_like_probably_japanese_text(visible) {
+        return false;
+    }
+    visible
+        .chars()
+        .filter(|ch| ch.is_alphabetic() || is_cjk_ideograph(*ch))
+        .count()
+        >= 6
 }
 
 fn looks_like_reference_number_list(text: &str) -> bool {
@@ -1886,6 +1947,18 @@ fn japanese_char_count(text: &str) -> usize {
             )
         })
         .count()
+}
+
+fn is_cjk_ideograph(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3400}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'
+    )
+}
+
+fn looks_like_probably_japanese_text(text: &str) -> bool {
+    text.chars()
+        .any(|ch| matches!(ch, '\u{3040}'..='\u{309f}' | '\u{30a0}'..='\u{30ff}'))
 }
 
 fn looks_like_localized_citation_line(source: &str, translated: &str) -> bool {

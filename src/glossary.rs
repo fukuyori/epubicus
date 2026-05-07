@@ -42,7 +42,7 @@ pub(crate) fn glossary_command(args: GlossaryArgs) -> Result<()> {
     let _run_lock = acquire_input_run_lock(&args.input, "glossary input EPUB")?;
     let book = unpack_epub(&args.input)?;
     let candidates = extract_glossary_candidates(&book, args.min_occurrences, args.max_entries)?;
-    let glossary = glossary_from_candidates(candidates);
+    let glossary = glossary_from_candidates(candidates, book.source_language.as_deref());
     let json = serde_json::to_string_pretty(&glossary)?;
     fs::write(&args.output, json)
         .with_context(|| format!("failed to write {}", args.output.display()))?;
@@ -59,10 +59,19 @@ pub(crate) fn glossary_command(args: GlossaryArgs) -> Result<()> {
     Ok(())
 }
 
-fn glossary_from_candidates(candidates: Vec<GlossaryCandidate>) -> GlossaryFile {
+fn glossary_from_candidates(
+    candidates: Vec<GlossaryCandidate>,
+    source_language: Option<&str>,
+) -> GlossaryFile {
     GlossaryFile {
         model: None,
-        source_lang: Some("en".to_string()),
+        source_lang: Some(
+            source_language
+                .map(str::trim)
+                .filter(|lang| !lang.is_empty())
+                .unwrap_or("auto")
+                .to_string(),
+        ),
         target_lang: Some("ja".to_string()),
         entries: candidates
             .into_iter()
@@ -81,16 +90,16 @@ fn glossary_review_prompt(glossary: &GlossaryFile) -> String {
     format!(
         r#"# EPUB 翻訳用語集レビュー依頼
 
-以下は、英語 EPUB から自動抽出した用語集候補です。
+以下は、原文 EPUB から自動抽出した用語集候補です。
 この文章全体を作業指示として読み、最後の JSON を修正してください。
 
 ## 作業目的
 
-英日翻訳で表記ゆれを防ぐため、人名、地名、組織名、製品名、作品名、専門用語を整理した用語集 JSON を作成してください。
+日本語翻訳で表記ゆれを防ぐため、人名、地名、組織名、製品名、作品名、専門用語を整理した用語集 JSON を作成してください。
 
 ## 入力 JSON の見方
 
-- `src`: 原文に出てきた英語表記です。
+- `src`: 原文に出てきた表記です。
 - `dst`: 日本語訳語です。空欄なので、自然で一貫した訳語を入れてください。翻訳時に使われるのは `src` と `dst` だけです。
 
 ## 修正方針
@@ -305,10 +314,13 @@ mod tests {
 
     #[test]
     fn generated_glossary_entries_only_emit_src_and_dst() {
-        let glossary = glossary_from_candidates(vec![GlossaryCandidate {
-            term: "Horizon".to_string(),
-            count: 3,
-        }]);
+        let glossary = glossary_from_candidates(
+            vec![GlossaryCandidate {
+                term: "Horizon".to_string(),
+                count: 3,
+            }],
+            Some("en"),
+        );
 
         let json = serde_json::to_string_pretty(&glossary).unwrap();
 
@@ -316,6 +328,20 @@ mod tests {
         assert!(json.contains("\"dst\": \"\""));
         assert!(!json.contains("\"kind\""));
         assert!(!json.contains("\"note\""));
+    }
+
+    #[test]
+    fn generated_glossary_uses_detected_source_language() {
+        let glossary = glossary_from_candidates(
+            vec![GlossaryCandidate {
+                term: "Caesar".to_string(),
+                count: 3,
+            }],
+            Some("la"),
+        );
+
+        assert_eq!(glossary.source_lang.as_deref(), Some("la"));
+        assert_eq!(glossary.target_lang.as_deref(), Some("ja"));
     }
 
     #[test]

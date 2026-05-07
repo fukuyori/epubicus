@@ -9,6 +9,7 @@
 #
 # Usage:
 #   .\scripts\create-glossary.ps1 .\test\sample.epub
+#   .\scripts\create-glossary.ps1 .\test\sample.epub -DevBuild
 #   .\scripts\create-glossary.ps1 .\test\sample.epub -Force
 #   .\scripts\create-glossary.ps1 .\test\sample.epub -NoRun
 
@@ -21,6 +22,8 @@ param(
     [int]$MaxEntries = 200,
 
     [string]$EpubicusExe,
+
+    [switch]$DevBuild,
 
     [switch]$Force,
 
@@ -73,15 +76,17 @@ Write-Host ""
 
 if (-not [string]::IsNullOrWhiteSpace($EpubicusExe)) {
     $EpubicusExe = (Resolve-Path -LiteralPath $EpubicusExe).Path
-    Write-Host "$EpubicusExe $($args -join ' ')"
     if (-not $NoRun) {
         & $EpubicusExe @args
         exit $LASTEXITCODE
     }
 } else {
-    Write-Host "cargo run --release -- $($args -join ' ')"
     if (-not $NoRun) {
-        cargo run --release -- @args
+        if ($DevBuild) {
+            cargo run --quiet -- @args
+        } else {
+            cargo run --release --quiet -- @args
+        }
         exit $LASTEXITCODE
     }
 }

@@ -16,7 +16,10 @@
 #
 #   Or load it without running:
 #     . .\scripts\claude-env.ps1 .\test\sample.epub -NoRun
-#     Invoke-EpubicusClaude
+#     Invoke-EpubicusTranslate
+#
+#   Use Cargo dev profile for script/debug checks:
+#     .\scripts\claude-env.ps1 .\test\sample.epub -DevBuild -NoRun
 
 param(
     [Parameter(Position = 0)]
@@ -33,6 +36,8 @@ param(
     [string[]]$ExtraArgs = @(),
 
     [switch]$UsageOnly,
+
+    [switch]$DevBuild,
 
     [switch]$NoRun,
 
@@ -73,7 +78,7 @@ $env:EPUBICUS_MAX_CHARS_PER_REQUEST = "3500"
 $env:EPUBICUS_CONCURRENCY = "$Concurrency"
 $env:EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE = "true"
 
-if ([string]::IsNullOrWhiteSpace($env:ANTHROPIC_API_KEY)) {
+if ((-not $UsageOnly) -and (-not $NoRun) -and [string]::IsNullOrWhiteSpace($env:ANTHROPIC_API_KEY)) {
     Write-Warning "ANTHROPIC_API_KEY is not set. Set it before running Claude API commands:"
     Write-Warning '$env:ANTHROPIC_API_KEY = Read-Host "Anthropic API key" -MaskInput'
 }
@@ -115,19 +120,26 @@ function Show-EpubicusClaudeCommands {
         Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
     }
     Write-Host ""
-    Write-Host "Normal Claude conversion:"
-    Write-Host "Invoke-EpubicusClaude"
-    Write-Host "cargo run --release -- $((New-EpubicusClaudeArgs) -join ' ')"
+    Write-Host "Normal conversion:"
+    Write-Host "Invoke-EpubicusTranslate"
     Write-Host ""
 }
 
+function Invoke-EpubicusTranslate {
+    if ($DevBuild) {
+        cargo run --quiet -- @(New-EpubicusClaudeArgs)
+    } else {
+        cargo run --release --quiet -- @(New-EpubicusClaudeArgs)
+    }
+}
+
 function Invoke-EpubicusClaude {
-    cargo run --release -- @(New-EpubicusClaudeArgs)
+    Invoke-EpubicusTranslate
 }
 
 Show-EpubicusClaudeCommands
 
 if (-not $NoRun) {
-    Invoke-EpubicusClaude
+    Invoke-EpubicusTranslate
 }
 

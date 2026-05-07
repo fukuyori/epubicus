@@ -140,15 +140,13 @@ if (-not [string]::IsNullOrWhiteSpace($GlossaryPath)) {
 Write-Host ""
 
 if ($null -ne $exe) {
-    Write-Host "$exe $($args -join ' ')"
     if (-not $NoRun) {
         & $exe @args
         exit $LASTEXITCODE
     }
 } else {
-    Write-Host "cargo run --release -- $($args -join ' ')"
     if (-not $NoRun) {
-        cargo run --release -- @args
+        cargo run --release --quiet -- @args
         exit $LASTEXITCODE
     }
 }

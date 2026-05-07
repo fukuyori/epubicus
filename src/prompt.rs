@@ -41,19 +41,33 @@ pub(crate) fn retry_user_prompt(
     prompt
 }
 
-pub(crate) fn system_prompt(style: &str) -> String {
+pub(crate) fn system_prompt(style: &str, source_language: Option<&str>) -> String {
+    let source_language = source_language_instruction(source_language);
     format!(
-        "あなたは英日翻訳の専門家です。出版物として通用する自然で読みやすい日本語に翻訳してください。\n\n\
+        "あなたは多言語から日本語への翻訳の専門家です。{source_language}出版物として通用する自然で読みやすい日本語に翻訳してください。\n\n\
 【絶対遵守ルール】\n\
 1. 入力中の ⟦…⟧ で囲まれたマーカは、形を一切変えずに訳文に含めてください。\n\
 2. マーカの順序は日本語として自然になるように入れ替えて構いませんが、原文に現れた全てのマーカを過不足なく残してください。\n\
 3. マーカの中身を改変・追加・削除しないでください。\n\
    Do not create any new ⟦...⟧ markers. A self-closing marker such as ⟦S1⟧ stands alone; never output ⟦/S1⟧.\n\
-4. マーカに挟まれた英語本文も翻訳対象です。タグを表すマーカだけを残し、英語原文を不要に残さないでください。\n\
+4. マーカに挟まれた本文も翻訳対象です。タグを表すマーカだけを残し、原文を不要に残さないでください。\n\
 5. 翻訳のみを出力し、説明・前置き・括弧書きの注釈を一切付けないでください。\n\
 6. <glossary> が与えられた場合、そこにある訳語を必ず使用し、表記を統一してください。\n\n{}",
         style_prompt(style)
     )
+}
+
+fn source_language_instruction(source_language: Option<&str>) -> String {
+    let Some(language) = source_language
+        .map(str::trim)
+        .filter(|lang| !lang.is_empty())
+    else {
+        return "入力文の言語を推定し、".to_string();
+    };
+    if language.eq_ignore_ascii_case("und") || language.eq_ignore_ascii_case("unknown") {
+        return "入力文の言語を推定し、".to_string();
+    }
+    format!("この EPUB の原文言語メタデータは `{language}` です。この情報を参考にし、")
 }
 
 fn style_prompt(style: &str) -> &'static str {
@@ -110,7 +124,7 @@ fn append_reason_specific_retry_instruction(prompt: &mut String, source: &str, r
             prompt.push_str("Include every marker above exactly as written. You may reorder markers only when needed for natural Japanese.\n");
         }
         "unchanged_source" | "untranslated_text" | "untranslated_segment" => {
-            prompt.push_str("\nProper nouns, URLs, numbers, symbols, file paths, and code-like identifiers may remain unchanged when appropriate. Translate the surrounding prose/body text into Japanese.\n");
+            prompt.push_str("\nProper nouns, URLs, numbers, symbols, file paths, and code-like identifiers may remain unchanged when appropriate. Translate the surrounding prose/body text into Japanese, regardless of the source language.\n");
             prompt.push_str("If the source is a title, heading, caption, or short phrase, still translate it into natural Japanese. Do not return the source text unchanged unless it is only a URL, DOI, ISBN, number, symbol, code, or identifier.\n");
         }
         "truncated" => {

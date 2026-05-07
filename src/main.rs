@@ -114,7 +114,7 @@ pub(crate) fn recoverable_error(message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
-fn is_recoverable_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_recoverable_error(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.downcast_ref::<RecoverableError>().is_some())
 }
@@ -152,8 +152,6 @@ fn run_cli() -> Result<()> {
 pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     let started = Instant::now();
     let _run_lock = acquire_input_run_lock(&args.input, "translate input EPUB")?;
-    let input = args.input.clone();
-    let glossary = args.common.glossary.clone();
     let output = args
         .output
         .unwrap_or_else(|| default_output_path(&args.input));
@@ -165,7 +163,8 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
     let kindle_fixed_layout_disabled = args.common.no_kindle_fixed_layout;
     let cache_args = cache_args_for_read_only_if_needed(&args.common);
     let cache = CacheStore::from_args(&args.input, &cache_args)?;
-    let mut translator = Translator::new(args.common, cache)?;
+    let mut translator =
+        Translator::new_with_source_language(args.common, cache, book.source_language.clone())?;
     if usage_only {
         let report = estimate_usage(&book, range, &translator)?;
         report.print(&translator);
@@ -266,32 +265,14 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
         eprintln!("  no cache misses or untranslated blocks remain.");
     } else if translator.cache.enabled && cache_was_kept_or_partial {
         eprintln!("Resume:");
-        if let Some(summary) = &untranslated_summary {
-            eprintln!("  recover the untranslated blocks, then rebuild from the cache.");
+        if untranslated_summary.is_some() {
             eprintln!(
-                "  recover: {}",
-                recovery_command(
-                    &summary.recovery_path,
-                    &output,
-                    &translator.cache.root,
-                    translator.backend.provider,
-                    &translator.backend.model,
-                    glossary.as_deref(),
-                )
+                "  recover the untranslated blocks with the recovery script, then rebuild from the cache."
             );
+            eprintln!("  script: .\\scripts\\recover-from-cache.ps1");
         } else {
             eprintln!("  rerun the same command to continue; cached blocks will be reused.");
-            eprintln!(
-                "  partial rebuild: {}",
-                partial_rebuild_command(
-                    &input,
-                    &output,
-                    &translator.cache.root,
-                    translator.backend.provider,
-                    &translator.backend.model,
-                    glossary.as_deref(),
-                )
-            );
+            eprintln!("  rebuild script: .\\scripts\\rebuild-deepseek.ps1");
         }
     }
     eprintln!("Time:");
@@ -313,6 +294,14 @@ pub(crate) fn translate_command(args: TranslateArgs) -> Result<()> {
             output.display()
         )));
     }
+    if let Some(summary) = &untranslated_summary {
+        return Err(recoverable_error(format!(
+            "output contains {} recoverable untranslated block(s); output EPUB was written to {}; recovery log: {}",
+            summary.count,
+            output.display(),
+            summary.recovery_path.display()
+        )));
+    }
     Ok(())
 }
 
@@ -324,7 +313,8 @@ fn test_command(args: TestArgs) -> Result<()> {
     let usage_only = args.common.usage_only;
     let cache_args = cache_args_for_read_only_if_needed(&args.common);
     let cache = CacheStore::from_args(&args.input, &cache_args)?;
-    let mut translator = Translator::new(args.common, cache)?;
+    let mut translator =
+        Translator::new_with_source_language(args.common, cache, book.source_language.clone())?;
     if usage_only {
         let report = estimate_usage(&book, range, &translator)?;
         report.print(&translator);
@@ -432,84 +422,6 @@ fn format_duration_hms(duration: Duration) -> String {
     let minutes = (total % 3600) / 60;
     let seconds = total % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
-}
-
-fn partial_rebuild_command(
-    input: &Path,
-    output: &Path,
-    cache_root: &Path,
-    provider: Provider,
-    model: &str,
-    glossary: Option<&Path>,
-) -> String {
-    let mut parts = vec![
-        "cargo".to_string(),
-        "run".to_string(),
-        "--release".to_string(),
-        "--".to_string(),
-        "translate".to_string(),
-        shell_arg(input.display().to_string()),
-        "--provider".to_string(),
-        provider.to_string(),
-        "--model".to_string(),
-        shell_arg(model),
-        "--cache-root".to_string(),
-        shell_arg(cache_root.display().to_string()),
-        "--partial-from-cache".to_string(),
-        "--keep-cache".to_string(),
-        "--output".to_string(),
-        shell_arg(output.display().to_string()),
-    ];
-    if let Some(glossary) = glossary {
-        parts.push("--glossary".to_string());
-        parts.push(shell_arg(glossary.display().to_string()));
-    }
-    parts.join(" ")
-}
-
-fn recovery_command(
-    recovery_log: &Path,
-    output: &Path,
-    cache_root: &Path,
-    provider: Provider,
-    model: &str,
-    glossary: Option<&Path>,
-) -> String {
-    let mut parts = vec![
-        "cargo".to_string(),
-        "run".to_string(),
-        "--release".to_string(),
-        "--".to_string(),
-        "recover".to_string(),
-        shell_arg(recovery_log.display().to_string()),
-        "--provider".to_string(),
-        provider.to_string(),
-        "--model".to_string(),
-        shell_arg(model),
-        "--cache-root".to_string(),
-        shell_arg(cache_root.display().to_string()),
-        "--rebuild".to_string(),
-        "--output".to_string(),
-        shell_arg(output.display().to_string()),
-    ];
-    if let Some(glossary) = glossary {
-        parts.push("--glossary".to_string());
-        parts.push(shell_arg(glossary.display().to_string()));
-    }
-    parts.join(" ")
-}
-
-fn shell_arg(value: impl AsRef<str>) -> String {
-    let value = value.as_ref();
-    if value.is_empty()
-        || value
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '$' | '&' | '|'))
-    {
-        format!("'{}'", value.replace('\'', "''"))
-    } else {
-        value.to_string()
-    }
 }
 
 fn default_model_for_provider(provider: Provider) -> &'static str {
@@ -704,7 +616,10 @@ fn add_uncached_usage_estimate(
     estimate: &mut UsageEstimate,
 ) {
     let chunks = split_translation_chunks(source, translator.backend.max_chars_per_request);
-    let system = system_prompt(&translator.backend.style);
+    let system = system_prompt(
+        &translator.backend.style,
+        translator.backend.source_language.as_deref(),
+    );
     for chunk in chunks {
         let glossary_subset = translator.backend.glossary_subset(&chunk);
         let prompt = user_prompt(&chunk, &glossary_subset);
@@ -1222,6 +1137,38 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("unchanged"));
+    }
+
+    #[test]
+    fn translation_validation_rejects_unchanged_latin_source_language() {
+        let source = "Le moteur Power Query utilise les colonnes de jointure.";
+        let err = validate_translation_response(source, source).unwrap_err();
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::UnchangedSource)
+        );
+    }
+
+    #[test]
+    fn translation_validation_rejects_unchanged_cjk_source_language() {
+        let source = "数据模型定义表之间的关系。";
+        let err = validate_translation_response(source, source).unwrap_err();
+        assert_eq!(
+            validation_failure_reason(&err),
+            Some(ValidationFailureReason::UnchangedSource)
+        );
+    }
+
+    #[test]
+    fn translation_validation_accepts_non_english_source_to_japanese() -> Result<()> {
+        validate_translation_response(
+            "Le moteur Power Query utilise les colonnes de jointure.",
+            "Power Query エンジンは結合列を使用する。",
+        )?;
+        validate_translation_response(
+            "数据模型定义表之间的关系。",
+            "データモデルは表間の関係を定義する。",
+        )
     }
 
     #[test]

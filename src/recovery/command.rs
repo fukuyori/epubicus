@@ -14,6 +14,7 @@ use super::log::{RecoveryRecord, hash_text, read_recovery_records, write_recover
 use crate::{
     cache::{CacheStore, newest_recovery_log_for_target},
     config::{Provider, RecoverArgs, TranslateArgs},
+    epub::unpack_epub,
     translate_command,
     translator::{Translator, is_provider_auth_error, is_structural_passthrough_source},
 };
@@ -71,8 +72,11 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
         None
     };
 
+    let source_language = unpack_epub(&input)
+        .ok()
+        .and_then(|book| book.source_language);
     let cache = CacheStore::from_args(&input, &common)?;
-    let mut translator = Translator::new(common, cache)?;
+    let mut translator = Translator::new_with_source_language(common, cache, source_language)?;
     let progress_message = Arc::new(Mutex::new(String::new()));
     translator.cache.begin_manifest_run()?;
     let failed_log = args
@@ -293,7 +297,14 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
             println!(
                 "note: the following translate summary is the rebuild step; its cache writes count does not include the recovery updates above."
             );
-            translate_command(rebuild_args)?;
+            if let Err(err) = translate_command(rebuild_args) {
+                if crate::is_recoverable_error(&err) {
+                    return Err(crate::recoverable_error(format!(
+                        "rebuild completed with recoverable untranslated content: {err}"
+                    )));
+                }
+                return Err(err);
+            }
         }
     }
 
@@ -414,11 +425,7 @@ fn recovery_progress_bar(total: usize) -> Result<ProgressBar> {
 }
 
 fn recovery_progress_message(record: &RecoveryRecord) -> String {
-    let name = Path::new(&record.href)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&record.href);
-    format!("p{} b{} {name}", record.page_no, record.block_index)
+    format!("p{} b{}", record.page_no, record.block_index)
 }
 
 #[derive(Clone, Default)]
@@ -466,11 +473,7 @@ fn recovery_progress_message_with_retries(
         "ok {} fail {} cached {}",
         counts.updated, counts.failed, counts.cached
     );
-    if retry_count == 0 {
-        format!("{message} | {counts}")
-    } else {
-        format!("{message} | {counts} | retries {retry_count}")
-    }
+    format!("{message} | {counts} | retries {retry_count}")
 }
 
 fn increment_reason_count(counts: &mut BTreeMap<String, usize>, reason: &str) {

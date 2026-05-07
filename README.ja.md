@@ -1,6 +1,6 @@
 # epubicus
 
-`epubicus` は、英語 EPUB を日本語 EPUB に翻訳する CLI ツールです。EPUB のパッケージ構造と XHTML の体裁をできるだけ保ったまま翻訳します。
+`epubicus` は、多言語の EPUB を日本語 EPUB に翻訳する CLI ツールです。EPUB のパッケージ構造と XHTML の体裁をできるだけ保ったまま翻訳します。
 
 翻訳 provider は Ollama、OpenAI API、Claude API、DeepSeek API に対応しています。
 
@@ -551,16 +551,16 @@ cargo run -- glossary .\book.epub -o .\glossary.candidates.json --review-prompt 
 
 `glossary-review.md` には作業説明のコメント、各フィールドの意味、修正方針、候補 JSON がまとまって入るため、そのまま ChatGPT / Claude に貼り付けられます。`glossary.candidates.json` 側はコメントなしの正規 JSON として出力します。
 
-`dst` に訳語を入れます。
+`source_lang` は元 EPUB の `dc:language` から自動設定されます。未設定の場合は `auto` になります。`dst` に訳語を入れます。
 
 ```json
 {
-  "source_lang": "en",
+  "source_lang": "la",
   "target_lang": "ja",
   "entries": [
     {
-      "src": "Horizon",
-      "dst": "ホライゾン"
+      "src": "Caesar",
+      "dst": "カエサル"
     }
   ]
 }

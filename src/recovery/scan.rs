@@ -30,7 +30,8 @@ pub(crate) fn scan_recovery_command(args: ScanRecoveryArgs) -> Result<()> {
     common.usage_only = false;
     common.partial_from_cache = false;
     let cache = CacheStore::from_args(&args.input, &common)?;
-    let translator = Translator::new(common, cache)?;
+    let translator =
+        Translator::new_with_source_language(common, cache, input_book.source_language.clone())?;
     let mut report = UntranslatedReport::for_output(
         &args.input,
         &args.output,

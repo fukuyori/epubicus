@@ -279,6 +279,7 @@ pub(super) fn collect_batch_verify(args: &BatchVerifyArgs) -> Result<BatchVerify
             provider,
             &model,
             &args.common.style,
+            book.source_language.as_deref(),
             &glossary,
             false,
             &mut expected,
