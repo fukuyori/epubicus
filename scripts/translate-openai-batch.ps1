@@ -1,24 +1,21 @@
-# epubicus OpenAI Batch API environment template.
+# epubicus OpenAI Batch API translate script.
 #
 # Usage:
-#   Copy this file to a local name if you want to customize it:
-#     Copy-Item .\scripts\openai-batch-env.template.ps1 .\scripts\openai-batch-env.ps1
-#
 #   Run a Batch API conversion:
-#     .\scripts\openai-batch-env.ps1 .\test\sample.epub
+#     .\scripts\translate-openai-batch.ps1 .\test\sample.epub
 #
 #   Page-range test:
-#     .\scripts\openai-batch-env.ps1 .\test\sample.epub -From 3 -To 3
+#     .\scripts\translate-openai-batch.ps1 .\test\sample.epub -From 3 -To 3
 #
 #   Use a glossary:
-#     .\scripts\openai-batch-env.ps1 .\test\sample.epub -Glossary .\glossary.json
-#     .\scripts\openai-batch-env.ps1 .\test\sample.epub --glossary .\glossary.json
+#     .\scripts\translate-openai-batch.ps1 .\test\sample.epub -Glossary .\glossary.json
+#     .\scripts\translate-openai-batch.ps1 .\test\sample.epub --glossary .\glossary.json
 #
 #   Pass additional epubicus batch run options:
-#     .\scripts\openai-batch-env.ps1 .\test\sample.epub -ExtraArgs @("--max-wait-secs", "3600")
+#     .\scripts\translate-openai-batch.ps1 .\test\sample.epub -ExtraArgs @("--max-wait-secs", "3600")
 #
 #   Or load it without running, then call a helper command:
-#     . .\scripts\openai-batch-env.ps1 .\test\sample.epub -NoRun
+#     . .\scripts\translate-openai-batch.ps1 .\test\sample.epub -NoRun
 #     Invoke-EpubicusOpenAiBatch
 #     Invoke-EpubicusOpenAiBatchStatus
 #     Invoke-EpubicusOpenAiBatchVerify
@@ -28,12 +25,16 @@ param(
     [Parameter(Position = 0)]
     [string]$InputPath,
 
+    [Alias("f")]
     [int]$From = 0,
 
+    [Alias("t")]
     [int]$To = 0,
 
+    [Alias("m")]
     [string]$Model = "gpt-5-mini",
 
+    [Alias("g")]
     [string]$Glossary,
 
     [string[]]$ExtraArgs = @(),
@@ -66,7 +67,7 @@ $inputDir = Split-Path -Parent $global:InputEpub
 $inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($global:InputEpub)
 $inputExtension = [System.IO.Path]::GetExtension($global:InputEpub)
 $global:OutputEpub = Join-Path $inputDir "$inputBaseName`_jp$inputExtension"
-$global:CacheRoot = Join-Path $ProjectRoot ".batch-openai-cache"
+$global:CacheRoot = Join-Path $ProjectRoot ".cache"
 $global:GlossaryPath = $null
 if (-not [string]::IsNullOrWhiteSpace($Glossary)) {
     $global:GlossaryPath = (Resolve-Path -LiteralPath $Glossary).Path

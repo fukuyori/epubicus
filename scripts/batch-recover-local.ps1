@@ -1,6 +1,6 @@
 # Recover unfinished OpenAI Batch work locally, then rebuild the EPUB.
 #
-# The script uses .batch-openai-cache by default and does not stop running
+# The script uses the shared .cache by default and does not stop running
 # epubicus processes. Use -NoRun first when checking a command sequence.
 #
 # Usage:
@@ -55,9 +55,11 @@ $inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($InputEpub)
 $inputExtension = [System.IO.Path]::GetExtension($InputEpub)
 
 if ([string]::IsNullOrWhiteSpace($CacheRoot)) {
-    $CacheRoot = Join-Path $ProjectRoot ".batch-openai-cache"
+    $CacheRoot = Join-Path $ProjectRoot ".cache"
 }
-$CacheRoot = (Resolve-Path -LiteralPath $CacheRoot).Path
+if (Test-Path -LiteralPath $CacheRoot) {
+    $CacheRoot = (Resolve-Path -LiteralPath $CacheRoot).Path
+}
 
 if ([string]::IsNullOrWhiteSpace($Output)) {
     $Output = Join-Path $inputDir "$inputBaseName`_jp$inputExtension"

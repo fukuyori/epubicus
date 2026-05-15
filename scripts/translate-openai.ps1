@@ -1,40 +1,50 @@
-# epubicus DeepSeek normal API environment template.
+# epubicus OpenAI translate script.
 #
 # Usage:
-#   Copy this file to a local name if you want to customize it:
-#     Copy-Item .\scripts\deepseek-env.template.ps1 .\scripts\deepseek-env.ps1
-#
-#   Run a normal DeepSeek API conversion:
-#     .\scripts\deepseek-env.ps1 .\test\sample.epub
+#   Run a normal OpenAI API conversion:
+#     .\scripts\translate-openai.ps1 .\test\sample.epub
 #
 #   Page-range test:
-#     .\scripts\deepseek-env.ps1 .\test\sample.epub -From 3 -To 3
+#     .\scripts\translate-openai.ps1 .\test\sample.epub -From 3 -To 3
+#
+#   Usage estimate only (no API call):
+#     .\scripts\translate-openai.ps1 .\test\sample.epub -From 3 -To 3 -UsageOnly
 #
 #   Rebuild from cache without calling the provider:
-#     .\scripts\deepseek-env.ps1 .\test\sample.epub -PartialFromCache
+#     .\scripts\translate-openai.ps1 .\test\sample.epub -PartialFromCache
+#
+#   Kindle fixed-layout output (force or suppress):
+#     .\scripts\translate-openai.ps1 .\test\sample.epub -KindleFixedLayout
+#     .\scripts\translate-openai.ps1 .\test\sample.epub -NoKindleFixedLayout
 #
 #   Pass additional epubicus translate options:
-#     .\scripts\deepseek-env.ps1 .\test\sample.epub -ExtraArgs @("--glossary", ".\glossary.json")
-#     .\scripts\deepseek-env.ps1 .\test\sample.epub --glossary .\glossary.json
+#     .\scripts\translate-openai.ps1 .\test\sample.epub --glossary .\glossary.json
 #
 #   Or load it without running:
-#     . .\scripts\deepseek-env.ps1 .\test\sample.epub -NoRun
+#     . .\scripts\translate-openai.ps1 .\test\sample.epub -NoRun
 #     Invoke-EpubicusTranslate
 #
 #   Use Cargo dev profile for script/debug checks:
-#     .\scripts\deepseek-env.ps1 .\test\sample.epub -DevBuild -NoRun
+#     .\scripts\translate-openai.ps1 .\test\sample.epub -DevBuild -NoRun
 
 param(
     [Parameter(Position = 0)]
     [string]$InputPath,
 
+    [Alias("f")]
     [int]$From = 0,
 
+    [Alias("t")]
     [int]$To = 0,
 
-    [string]$Model = "deepseek-v4-flash",
+    [Alias("m")]
+    [string]$Model = "gpt-5-mini",
 
-    [int]$Concurrency = 2,
+    [Alias("c")]
+    [int]$Concurrency = 4,
+
+    [Alias("s")]
+    [string]$Style = "essay",
 
     [string[]]$ExtraArgs = @(),
 
@@ -70,7 +80,7 @@ $inputDir = Split-Path -Parent $global:InputEpub
 $inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($global:InputEpub)
 $inputExtension = [System.IO.Path]::GetExtension($global:InputEpub)
 $global:OutputEpub = Join-Path $inputDir "$inputBaseName`_jp$inputExtension"
-$global:CacheRoot = Join-Path $ProjectRoot ".deepseek-cache"
+$global:CacheRoot = Join-Path $ProjectRoot ".cache"
 $ExtraArgs = @($ExtraArgs) + @($PassthroughArgs)
 $global:GlossaryPath = $null
 if (($ExtraArgs -notcontains "--glossary") -and ($ExtraArgs -notcontains "-g") -and -not ($ExtraArgs | Where-Object { $_.StartsWith("--glossary=") })) {
@@ -80,9 +90,10 @@ if (($ExtraArgs -notcontains "--glossary") -and ($ExtraArgs -notcontains "-g") -
     }
 }
 
-$env:EPUBICUS_PROVIDER = "deepseek"
+$env:EPUBICUS_PROVIDER = "openai"
 $env:EPUBICUS_MODEL = $Model
-$env:EPUBICUS_STYLE = "essay"
+$env:EPUBICUS_OPENAI_BASE_URL = "https://api.openai.com/v1"
+$env:EPUBICUS_STYLE = $Style
 $env:EPUBICUS_TEMPERATURE = "0.3"
 $env:EPUBICUS_TIMEOUT_SECS = "900"
 $env:EPUBICUS_RETRIES = "3"
@@ -90,16 +101,16 @@ $env:EPUBICUS_MAX_CHARS_PER_REQUEST = "3500"
 $env:EPUBICUS_CONCURRENCY = "$Concurrency"
 $env:EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE = "true"
 
-if ((-not $UsageOnly) -and (-not $NoRun) -and [string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY)) {
-    $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
+if ((-not $UsageOnly) -and (-not $NoRun) -and [string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
+    $env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
 }
 
-if ((-not $UsageOnly) -and (-not $NoRun) -and [string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY)) {
-    Write-Warning "DEEPSEEK_API_KEY is not set. Set it before running DeepSeek API commands:"
-    Write-Warning '$env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput'
+if ((-not $UsageOnly) -and (-not $NoRun) -and [string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
+    Write-Warning "OPENAI_API_KEY is not set. Set it before running OpenAI API commands:"
+    Write-Warning '$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput'
 }
 
-function New-EpubicusDeepSeekArgs {
+function New-EpubicusTranslateArgs {
     $args = @(
         "translate",
         $global:InputEpub,
@@ -132,11 +143,12 @@ function New-EpubicusDeepSeekArgs {
     return $args
 }
 
-function Show-EpubicusDeepSeekCommands {
+function Show-EpubicusTranslateCommands {
     Write-Host ""
     Write-Host "InputEpub  = $global:InputEpub"
     Write-Host "OutputEpub = $global:OutputEpub"
     Write-Host "CacheRoot  = $global:CacheRoot"
+    Write-Host "Provider   = $env:EPUBICUS_PROVIDER"
     Write-Host "Model      = $env:EPUBICUS_MODEL"
     if (-not [string]::IsNullOrWhiteSpace($global:GlossaryPath)) {
         Write-Host "Glossary   = $global:GlossaryPath"
@@ -145,24 +157,20 @@ function Show-EpubicusDeepSeekCommands {
         Write-Host "ExtraArgs  = $($ExtraArgs -join ' ')"
     }
     Write-Host ""
-    Write-Host "Normal conversion:"
+    Write-Host "Conversion:"
     Write-Host "Invoke-EpubicusTranslate"
     Write-Host ""
 }
 
 function Invoke-EpubicusTranslate {
     if ($DevBuild) {
-        cargo run --quiet -- @(New-EpubicusDeepSeekArgs)
+        cargo run --quiet -- @(New-EpubicusTranslateArgs)
     } else {
-        cargo run --release --quiet -- @(New-EpubicusDeepSeekArgs)
+        cargo run --release --quiet -- @(New-EpubicusTranslateArgs)
     }
 }
 
-function Invoke-EpubicusDeepSeek {
-    Invoke-EpubicusTranslate
-}
-
-Show-EpubicusDeepSeekCommands
+Show-EpubicusTranslateCommands
 
 if (-not $NoRun) {
     Invoke-EpubicusTranslate

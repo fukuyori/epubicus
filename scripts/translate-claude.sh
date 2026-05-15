@@ -1,12 +1,11 @@
 #!/usr/bin/env sh
-# epubicus OpenAI normal API environment template.
+# epubicus Claude translate script.
 #
 # Usage:
-#   cp scripts/openai-env.template.sh scripts/openai-env.sh
-#   chmod +x scripts/openai-env.sh
-#   export OPENAI_API_KEY="..."
-#   scripts/openai-env.sh ./book.epub
-#   scripts/openai-env.sh ./book.epub -- --glossary ./glossary.json
+#   chmod +x scripts/translate-claude.sh
+#   export ANTHROPIC_API_KEY="..."
+#   scripts/translate-claude.sh ./book.epub
+#   scripts/translate-claude.sh ./book.epub -- --glossary ./glossary.json
 
 set -eu
 
@@ -16,17 +15,17 @@ PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 INPUT_PATH=""
 FROM="0"
 TO="0"
-MODEL="gpt-5-mini"
+MODEL="claude-sonnet-4-5"
 CONCURRENCY="1"
 USAGE_ONLY="0"
 NO_RUN="0"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --from) FROM="$2"; shift 2 ;;
-        --to) TO="$2"; shift 2 ;;
-        --model) MODEL="$2"; shift 2 ;;
-        --concurrency) CONCURRENCY="$2"; shift 2 ;;
+        --from|-f) FROM="$2"; shift 2 ;;
+        --to|-t) TO="$2"; shift 2 ;;
+        --model|-m) MODEL="$2"; shift 2 ;;
+        --concurrency|-c) CONCURRENCY="$2"; shift 2 ;;
         --usage-only) USAGE_ONLY="1"; shift ;;
         --no-run) NO_RUN="1"; shift ;;
         --) shift; break ;;
@@ -46,7 +45,7 @@ if [ "$INPUT_BASE" = "$INPUT_FILE" ]; then OUTPUT_FILE="${INPUT_FILE}_jp"; else 
 
 export InputEpub="$INPUT_DIR/$INPUT_FILE"
 export OutputEpub="$INPUT_DIR/$OUTPUT_FILE"
-export CacheRoot="$PROJECT_ROOT/.openai-cache"
+export CacheRoot="$PROJECT_ROOT/.cache"
 AutoGlossary=""
 case " $* " in
     *" --glossary "*|*" --glossary="*|*" -g "*) ;;
@@ -56,9 +55,9 @@ case " $* " in
         fi
         ;;
 esac
-export EPUBICUS_PROVIDER="openai"
+export EPUBICUS_PROVIDER="claude"
 export EPUBICUS_MODEL="$MODEL"
-export EPUBICUS_OPENAI_BASE_URL="https://api.openai.com/v1"
+export EPUBICUS_CLAUDE_BASE_URL="https://api.anthropic.com/v1"
 export EPUBICUS_STYLE="essay"
 export EPUBICUS_TEMPERATURE="0.3"
 export EPUBICUS_TIMEOUT_SECS="900"
@@ -67,11 +66,11 @@ export EPUBICUS_MAX_CHARS_PER_REQUEST="3500"
 export EPUBICUS_CONCURRENCY="$CONCURRENCY"
 export EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE="true"
 
-if [ -z "${OPENAI_API_KEY:-}" ]; then
-    echo "warning: OPENAI_API_KEY is not set" >&2
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "warning: ANTHROPIC_API_KEY is not set" >&2
 fi
 
-invoke_epubicus_openai() {
+invoke_epubicus_claude() {
     set -- translate "$InputEpub" --cache-root "$CacheRoot" --keep-cache --output "$OutputEpub" "$@"
     if [ -n "$AutoGlossary" ]; then set -- "$@" --glossary "$AutoGlossary"; fi
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
@@ -92,11 +91,11 @@ if [ "$#" -gt 0 ]; then
     echo "ExtraArgs  = $*"
 fi
 echo
-echo "Normal OpenAI conversion:"
-echo "invoke_epubicus_openai"
+echo "Normal Claude conversion:"
+echo "invoke_epubicus_claude"
 echo
 
 if [ "$NO_RUN" = "0" ]; then
-    invoke_epubicus_openai "$@"
+    invoke_epubicus_claude "$@"
 fi
 

@@ -123,7 +123,7 @@ Cache:
 同じスクリプトを再実行します。
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub
+.\scripts\translate-deepseek.ps1 .\book.epub
 ```
 
 これは同じ provider / model / glossary で続行する前提です。
@@ -133,19 +133,19 @@ Cache:
 まず同じ model で recovery します。
 
 ```powershell
-.\scripts\recover-deepseek.ps1 .\book.epub
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek
 ```
 
 同じ model で何度か試して改善しない場合、強い model に切り替えます。
 
 ```powershell
-.\scripts\recover-deepseek.ps1 .\book.epub deepseek-v4-pro
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Model deepseek-v4-pro
 ```
 
 少数だけ残る場合は、手動訳を直接キャッシュへ入れます。
 
 ```powershell
-.\scripts\manual-recover-deepseek.ps1 .\book.epub .\book.manual.json
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
 ```
 
 ## CLI 設計案

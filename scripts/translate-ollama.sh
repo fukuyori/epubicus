@@ -1,16 +1,15 @@
 #!/usr/bin/env sh
-# epubicus local Ollama environment template.
+# epubicus Ollama (local) translate script.
 #
 # Usage:
-#   cp scripts/local-ollama-env.template.sh scripts/local-ollama-env.sh
-#   chmod +x scripts/local-ollama-env.sh
-#   scripts/local-ollama-env.sh ./book.epub
+#   chmod +x scripts/translate-ollama.sh
+#   scripts/translate-ollama.sh ./book.epub
 #
 # Modes:
-#   scripts/local-ollama-env.sh ./book.epub --mode page --from 3 --to 3
-#   scripts/local-ollama-env.sh ./book.epub --mode cache
-#   . scripts/local-ollama-env.sh ./book.epub --no-run
-#   scripts/local-ollama-env.sh ./book.epub -- --glossary ./glossary.json
+#   scripts/translate-ollama.sh ./book.epub --mode page --from 3 --to 3
+#   scripts/translate-ollama.sh ./book.epub --mode cache
+#   . scripts/translate-ollama.sh ./book.epub --no-run
+#   scripts/translate-ollama.sh ./book.epub -- --glossary ./glossary.json
 
 set -eu
 
@@ -29,11 +28,11 @@ while [ "$#" -gt 0 ]; do
             MODE="$2"
             shift 2
             ;;
-        --from)
+        --from|-f)
             FROM="$2"
             shift 2
             ;;
-        --to)
+        --to|-t)
             TO="$2"
             shift 2
             ;;
@@ -77,7 +76,7 @@ fi
 
 export InputEpub="$INPUT_DIR/$INPUT_FILE"
 export OutputEpub="$INPUT_DIR/$OUTPUT_FILE"
-export CacheRoot="$PROJECT_ROOT/.local-ollama-cache"
+export CacheRoot="$PROJECT_ROOT/.cache"
 AutoGlossary=""
 case " $* " in
     *" --glossary "*|*" --glossary="*|*" -g "*) ;;

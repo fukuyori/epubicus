@@ -7,6 +7,7 @@
 ## ドキュメント
 
 - [docs/README.md](docs/README.md): 運用ガイド、復旧手順、設計メモの索引。
+- [docs/scripts-reference.ja.md](docs/scripts-reference.ja.md): `scripts/` 各スクリプトの目的・引数・使用例リファレンス。
 - [docs/translation-workflow.ja.md](docs/translation-workflow.ja.md): glossary 作成から方式別の翻訳・リカバリーまでの手順書。
 - [docs/operation-guide.ja.md](docs/operation-guide.ja.md): 日本語の運用ガイド。
 - [docs/detailed-examples.ja.md](docs/detailed-examples.ja.md): 詳細な実行例と cache 操作。
@@ -24,7 +25,7 @@
 
 `inspect-epub.ps1` の出力例:
 
-この出力は、後続の `usage-deepseek.ps1` / `page-deepseek.ps1` に渡す開始番号・終了番号を選ぶために見ます。`toc` の章タイトルと `inspect` の `Href` を見比べて、本文らしい番号を選んでください。たとえば次のように、目次で第 1 章が `c66.xhtml` を指していて、`inspect` の一覧で `c66.xhtml` が `No 9` なら、確認範囲には `9 9` を使います。
+この出力は、後続の `usage.ps1` や `translate-deepseek.ps1 -From -To` に渡す開始番号・終了番号を選ぶために見ます。`toc` の章タイトルと `inspect` の `Href` を見比べて、本文らしい番号を選んでください。たとえば次のように、目次で第 1 章が `c66.xhtml` を指していて、`inspect` の一覧で `c66.xhtml` が `No 9` なら、確認範囲には `9 9` を使います。
 
 ```text
 [inspect]
@@ -59,10 +60,10 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
 使用量を確認します。このコマンドは provider を呼び出しません。
 
 ```powershell
-.\scripts\usage-deepseek.ps1 .\book.epub 9 9
+.\scripts\usage.ps1 .\book.epub 9 9 -Provider deepseek
 ```
 
-`usage-deepseek.ps1` の出力例:
+`usage.ps1` の出力例:
 
 選んだ範囲を翻訳すると何リクエスト・何 token くらい使いそうかを見積もります。未キャッシュの範囲では概算 token が表示されます。すでに全ブロックがキャッシュ済みの場合、未キャッシュ分の概算は `0` になります。
 
@@ -93,13 +94,13 @@ Estimated tokens: input 2035, output 902, total 2937
 
 この範囲を初めて翻訳すると、概算で 8 リクエスト、合計 2937 token ほど使う見込みです。token 数は provider に送る前の概算なので、実際の API usage とは少しずれることがあります。
 
-本文ファイル 1 個だけを試し翻訳します。このコマンドは実際に provider を呼び出し、`.\book_jp.epub` を書きます。
+本文ファイル 1 個だけを試し翻訳します。このコマンドは実際に provider を呼び出し、`.\book_jp.epub` を書きます。`-From` と `-To` で範囲を指定します。
 
 ```powershell
-.\scripts\page-deepseek.ps1 .\book.epub 9 9
+.\scripts\translate-deepseek.ps1 .\book.epub -From 9 -To 9
 ```
 
-`page-deepseek.ps1` の出力例:
+試し翻訳の出力例:
 
 選んだ本文ファイルだけを翻訳した結果です。
 
@@ -134,17 +135,17 @@ writes: 8
 
 既存キャッシュは 0 件、API に送った未キャッシュブロックは 8 件、成功してキャッシュへ書いた訳文は 8 件です。再実行時に `hits` が増え、`misses` と `writes` が減れば、キャッシュ再利用が効いています。
 
-試し翻訳スクリプトの引数です。開始番号と終了番号は必須です。省略するとエラーになります。全体翻訳ではありません。
+使用量見積もり・試し翻訳の引数形式です。`usage.ps1` は開始番号と終了番号が必須、`translate-deepseek.ps1` は `-From` / `-To` を省略すると全体翻訳になります。
 
 ```text
-usage-deepseek.ps1 <入力EPUB> <開始番号> <終了番号>
-page-deepseek.ps1  <入力EPUB> <開始番号> <終了番号>
+usage.ps1                <入力EPUB> <開始番号> <終了番号> -Provider deepseek
+translate-deepseek.ps1   <入力EPUB> [-From <開始番号> -To <終了番号>]
 ```
 
-全体を翻訳します。出力は入力 EPUB と同じフォルダの `<入力名>_jp.epub` です。
+全体を翻訳します。`-From` / `-To` を付けなければ全 spine を対象とします。出力は入力 EPUB と同じフォルダの `<入力名>_jp.epub` です。
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub
+.\scripts\translate-deepseek.ps1 .\book.epub
 ```
 
 変換後の出力例:
@@ -161,9 +162,9 @@ Cache:
   hits: 1090
   misses: 3
   writes: 8
-  location: D:\books\.deepseek-cache\0123456789abcdef0123456789abcdef
-Untranslated report: 3 block(s) written to D:\books\.deepseek-cache\0123456789abcdef0123456789abcdef\recovery\book_jp\untranslated.txt
-Recovery log: D:\books\.deepseek-cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl
+  location: D:\books\.cache\0123456789abcdef0123456789abcdef
+Untranslated report: 3 block(s) written to D:\books\.cache\0123456789abcdef0123456789abcdef\recovery\book_jp\untranslated.txt
+Recovery log: D:\books\.cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl
 Resume:
   recover the untranslated blocks, then rebuild from the cache.
   recover: cargo run --release -- recover ...
@@ -197,36 +198,56 @@ Recovery log: ...
 
 未翻訳が残っています。`untranslated.txt` は人間が読む確認用、`recovery.jsonl` は復旧コマンドが使うログです。`misses` や未翻訳数が 0 なら、通常は追加作業は不要です。
 
-リカバリーの流れ:
+処理の流れ:
 
 ```mermaid
 flowchart TD
-    A["translate を実行"] --> B{"Untranslated report / Recovery log が出たか"}
-    B -->|出ていない| C["完了\n追加作業なし"]
-    B -->|出た| D["recover-deepseek.ps1 を実行"]
+    P0["inspect-epub.ps1\n(spine/toc 確認)"] --> P1["create-glossary.ps1\n(用語集生成)"]
+    P1 --> P2["usage.ps1\n(API 使用量見積もり)"]
+    P2 --> A["translate-deepseek.ps1\n(翻訳実行)"]
+    A --> B{"Untranslated report /\nRecovery log が出たか"}
+    B -->|出ていない| S["scan-and-recover.ps1\n(出力 EPUB の品質スキャン)"]
+    S --> C["完了\n追加作業なし"]
+    B -->|出た| D["recover-from-cache.ps1\n-Provider deepseek\n(通常リカバリ)"]
     D --> E{"unrecoverable は 0 か"}
-    E -->|はい| F["キャッシュから EPUB を再生成"]
+    E -->|はい| F["rebuild-from-cache.ps1\n(キャッシュから EPUB 再生成)"]
     F --> G{"Complete が出たか"}
-    G -->|はい| C
+    G -->|はい| S
     G -->|いいえ| H["残った recovery.jsonl を再確認"]
     E -->|いいえ| I["failed.jsonl / untranslated.txt を確認"]
     I --> J{"残りの性質"}
     J -->|短い見出し・固有名詞・索引| K["manual JSON に訳文または原文保持を入れる"]
     J -->|長文・通常文| L["別 model/provider または少数件だけ再試行"]
     J -->|URL・メール・コード・参照項目| M["原文保持でよいか確認"]
-    K --> N["manual-recover-deepseek.ps1 を実行"]
+    K --> N["recover-from-cache.ps1\n-Manual <json>\n(手動リカバリ)"]
     M --> N
-    L --> O["recover-from-cache.ps1 で条件を絞って実行"]
+    L --> O["recover-from-cache.ps1\n-Provider <別> -Reason <絞込>\n(条件絞り再試行)"]
     N --> F
     O --> F
     H --> I
+    C --> Z["clear-all-caches.ps1\n(必要時のみ、キャッシュ整理)"]
 ```
+
+各ノードのスクリプトと役割:
+
+| 段階 | スクリプト | 役割 |
+|---|---|---|
+| 前処理 1 | `inspect-epub.ps1` | EPUB の spine / 目次を表示し、`-From` / `-To` に渡す番号を選ぶ |
+| 前処理 2 | `create-glossary.ps1` | 用語集候補（`book.json` / `book.md`）を生成 |
+| 見積もり | `usage.ps1 -Provider <P>` | 指定範囲の API リクエスト数 / token を試算（API 未呼出） |
+| 翻訳 | `translate-<provider>.ps1` | 全体翻訳 / 範囲翻訳。`-PartialFromCache` でキャッシュからの再生成も可 |
+| 通常リカバリ | `recover-from-cache.ps1 -Provider <P>` | `recovery.jsonl` の未翻訳ブロックを再翻訳 |
+| 手動リカバリ | `recover-from-cache.ps1 -Provider <P> -Manual <json>` | 手動訳 JSON をキャッシュ直書き（API 未呼出） |
+| Batch リカバリ | `batch-recover-local.ps1` | OpenAI Batch API 専用の複合救済ワークフロー |
+| 品質スキャン | `scan-and-recover.ps1 -Provider <P>` | 完成 EPUB を再走査し、validator を通った怪しいブロックを検出 |
+| 再構築 | `rebuild-from-cache.ps1` | API を呼ばず EPUB を再生成（provider/model はキャッシュから自動検出） |
+| キャッシュクリア | `clear-all-caches.ps1` | 全キャッシュ削除 |
 
 1. 変換後の出力に `Untranslated report:` または `Recovery log:` があるか確認します。
 2. 残っている場合は、同じ入力 EPUB に対して復旧スクリプトを実行します。
 
 ```powershell
-.\scripts\recover-deepseek.ps1 .\book.epub
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek
 ```
 
 復旧後の出力例:
@@ -234,7 +255,7 @@ flowchart TD
 ```text
 Recovery completed
 input: D:\books\book.epub
-cache: D:\books\.deepseek-cache\0123456789abcdef0123456789abcdef
+cache: D:\books\.cache\0123456789abcdef0123456789abcdef
 items: 3
 cache updated: 3
 unrecoverable: 0
@@ -257,30 +278,25 @@ Complete:
 
 | 種類 | スクリプト | 引数 | 説明 |
 |--|--|--|--|
-| 事前確認 | `inspect-epub.ps1` | `<入力EPUB>` | EPUB の本文ファイル順序と目次を表示します。`usage-deepseek.ps1` / `page-deepseek.ps1` に渡す開始番号・終了番号を選ぶために使います。 |
+| 事前確認 | `inspect-epub.ps1` | `<入力EPUB>` | EPUB の本文ファイル順序と目次を表示します。`usage.ps1` や `translate-deepseek.ps1 -From -To` に渡す開始番号・終了番号を選ぶために使います。 |
 | 用語集 | `create-glossary.ps1` | `<入力EPUB>` | 入力 EPUB の隣に glossary 候補 JSON を作ります。既に同名 JSON がある場合はそれを使います。詳細指定では `-MinOccurrences`、`-MaxEntries`、`-Force` も使えます。 |
-| 使用量確認 | `usage-deepseek.ps1` | `<入力EPUB> <開始番号> <終了番号>` | 指定した本文ファイル範囲について、DeepSeek に送る前にリクエスト数と概算 token 数を表示します。provider は呼びません。開始番号・終了番号は必須です。 |
-| 試し翻訳 | `page-deepseek.ps1` | `<入力EPUB> <開始番号> <終了番号>` | 指定した本文ファイル範囲だけを DeepSeek で翻訳し、出力 EPUB を作ります。全体翻訳前の品質確認に使います。開始番号・終了番号は必須です。 |
-| 全体翻訳 | `convert-deepseek.ps1` | `<入力EPUB>` | 入力 EPUB 全体を DeepSeek で翻訳し、`<入力名>_jp.epub` を作ります。中断後は同じコマンドで再開できます。 |
-| キャッシュ再生成 | `rebuild-deepseek.ps1` | `<入力EPUB> [auto\|fixed\|reflow]` | 既存キャッシュから EPUB を再生成します。第 2 引数は固定レイアウトの扱いで、省略時は `auto` です。 |
-| 復旧 | `recover-deepseek.ps1` | `<入力EPUB> [model]` | 最新の復旧ログから未翻訳ブロックだけを再翻訳し、成功した訳文をキャッシュへ戻して EPUB を再生成します。model 省略時は `deepseek-v4-flash` です。 |
-| 手動復旧 | `manual-recover-deepseek.ps1` | `<入力EPUB> <手動訳JSON>` | 手動訳 JSON を読み込み、provider を呼ばずに一致した item を直接キャッシュへ書き込みます。 |
-| 検査 | `scan-deepseek.ps1` | `<入力EPUB>` | 既に作成した `<入力名>_jp.epub` を検査し、未翻訳らしいブロックをレポートします。 |
-| 検査と復旧 | `scan-recover-deepseek.ps1` | `<入力EPUB>` | 既に作成した `<入力名>_jp.epub` を検査し、未翻訳候補があれば復旧して再生成します。 |
-| 詳細指定 | `recover-from-cache.ps1` | `<入力EPUB> [options]` | provider、model、cache root、理由、ページ、block などを細かく指定して復旧します。通常は `recover-deepseek.ps1` を使います。 |
-| 詳細指定 | `scan-and-recover.ps1` | `<入力EPUB> [出力EPUB] [options]` | provider や出力先を指定して scan-recovery を実行します。通常は `scan-recover-deepseek.ps1` を使います。 |
+| 使用量確認 | `usage.ps1` | `<入力EPUB> <開始番号> <終了番号> -Provider <name>` | 指定した本文ファイル範囲について、provider に送る前にリクエスト数と概算 token 数を表示します。provider は呼びません。開始番号・終了番号は必須です。 |
+| 翻訳 | `translate-deepseek.ps1` | `<入力EPUB> [-From <開始番号> -To <終了番号>]` | DeepSeek で翻訳し `<入力名>_jp.epub` を作ります。`-From` / `-To` で範囲指定、省略で全体翻訳。中断後は同じコマンドで再開できます。`-PartialFromCache` でキャッシュから再構築のみも可能です。OpenAI / Claude / Ollama 用には `translate-openai.ps1`、`translate-claude.ps1`、`translate-ollama.ps1`、`translate-openai-batch.ps1` を使います。 |
+| キャッシュ再生成 | `rebuild-from-cache.ps1` | `<入力EPUB> [auto\|fixed\|reflow]` | 既存キャッシュから EPUB を再生成します。第 2 引数は固定レイアウトの扱いで、省略時は `auto` です。 |
+| 復旧 | `recover-from-cache.ps1` | `<入力EPUB> -Provider <name> [options]` | 最新の復旧ログから未翻訳ブロックだけを再翻訳し、成功した訳文をキャッシュへ戻して EPUB を再生成します。`-Model` で model、`-Reason`、`-Limit` などで対象を絞れます。`-Manual <JSON>` で手動訳 JSON を直接キャッシュへ書き込みます。 |
+| 検査と復旧 | `scan-and-recover.ps1` | `<入力EPUB> -Provider <name> [-ScanOnly]` | 既に作成した `<入力名>_jp.epub` を検査し、未翻訳候補があれば復旧して再生成します。`-ScanOnly` で検査のみ行います。 |
 | 整理 | `clear-all-caches.ps1` | `[-DryRun] [-Yes]` | ローカルの翻訳キャッシュをまとめて削除します。`-DryRun` で対象確認、`-Yes` で確認なしに削除します。 |
 
-`convert-deepseek.ps1` には、`translate` の追加オプションをそのまま渡せます。小説向けに翻訳する場合は文体を `novel` にします。
+`translate-deepseek.ps1` には、`translate` の追加オプションをそのまま渡せます。小説向けに翻訳する場合は文体を `novel` にします。
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub --style novel
+.\scripts\translate-deepseek.ps1 .\book.epub --style novel
 ```
 
 丁寧寄りの小説文体にする場合:
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub --style novel-polite
+.\scripts\translate-deepseek.ps1 .\book.epub --style novel-polite
 ```
 
 ## コマンド
@@ -513,17 +529,17 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
 cargo run -- test .\book.epub --from 1 --to 1 --provider deepseek --model deepseek-v4-flash
 ```
 
-PowerShell テンプレートを使う場合:
+PowerShell スクリプトを使う場合:
 
-`usage-deepseek.ps1` と `page-deepseek.ps1` の 2 つ目と 3 つ目の引数は、開始番号と終了番号です。次の例は、`inspect-epub.ps1` の一覧で 9 番目に出る本文ファイルだけを対象にします。
+`usage.ps1` の 2 つ目と 3 つ目の引数、および `translate-deepseek.ps1` の `-From` / `-To` は、開始番号と終了番号を表します。次の例は、`inspect-epub.ps1` の一覧で 9 番目に出る本文ファイルだけを対象にします。
 
 ```powershell
 $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
-.\scripts\usage-deepseek.ps1 .\book.epub 9 9
-.\scripts\page-deepseek.ps1 .\book.epub 9 9
+.\scripts\usage.ps1 .\book.epub 9 9 -Provider deepseek
+.\scripts\translate-deepseek.ps1 .\book.epub -From 9 -To 9
 ```
 
-DeepSeek の model や並列数を固定で変えたい場合だけ、`deepseek-env.template.ps1` を `deepseek-env.ps1` にコピーして編集します。
+DeepSeek の model や並列数を固定で変えたい場合は、`scripts\translate-deepseek.ps1` を直接編集するか、CLI オプションで上書きします。
 
 実行時に API キーを非表示入力する例:
 

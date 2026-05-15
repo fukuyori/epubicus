@@ -1,12 +1,11 @@
 #!/usr/bin/env sh
-# epubicus DeepSeek normal API environment template.
+# epubicus OpenAI Batch API translate script.
 #
 # Usage:
-#   cp scripts/deepseek-env.template.sh scripts/deepseek-env.sh
-#   chmod +x scripts/deepseek-env.sh
-#   export DEEPSEEK_API_KEY="..."
-#   scripts/deepseek-env.sh ./book.epub
-#   scripts/deepseek-env.sh ./book.epub -- --glossary ./glossary.json
+#   chmod +x scripts/translate-openai-batch.sh
+#   export OPENAI_API_KEY="..."
+#   scripts/translate-openai-batch.sh ./book.epub
+#   scripts/translate-openai-batch.sh ./book.epub -- --glossary ./glossary.json
 
 set -eu
 
@@ -16,18 +15,18 @@ PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 INPUT_PATH=""
 FROM="0"
 TO="0"
-MODEL="deepseek-v4-flash"
-CONCURRENCY="1"
-USAGE_ONLY="0"
+MODEL="gpt-5-mini"
+POLL_SECS="180"
+NO_WAIT="0"
 NO_RUN="0"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --from) FROM="$2"; shift 2 ;;
-        --to) TO="$2"; shift 2 ;;
-        --model) MODEL="$2"; shift 2 ;;
-        --concurrency) CONCURRENCY="$2"; shift 2 ;;
-        --usage-only) USAGE_ONLY="1"; shift ;;
+        --from|-f) FROM="$2"; shift 2 ;;
+        --to|-t) TO="$2"; shift 2 ;;
+        --model|-m) MODEL="$2"; shift 2 ;;
+        --poll-secs) POLL_SECS="$2"; shift 2 ;;
+        --no-wait) NO_WAIT="1"; shift ;;
         --no-run) NO_RUN="1"; shift ;;
         --) shift; break ;;
         -*) echo "unknown option: $1" >&2; return 2 2>/dev/null || exit 2 ;;
@@ -46,7 +45,7 @@ if [ "$INPUT_BASE" = "$INPUT_FILE" ]; then OUTPUT_FILE="${INPUT_FILE}_jp"; else 
 
 export InputEpub="$INPUT_DIR/$INPUT_FILE"
 export OutputEpub="$INPUT_DIR/$OUTPUT_FILE"
-export CacheRoot="$PROJECT_ROOT/.deepseek-cache"
+export CacheRoot="$PROJECT_ROOT/.cache"
 AutoGlossary=""
 case " $* " in
     *" --glossary "*|*" --glossary="*|*" -g "*) ;;
@@ -56,41 +55,36 @@ case " $* " in
         fi
         ;;
 esac
-export EPUBICUS_PROVIDER="deepseek"
+export EPUBICUS_PROVIDER="openai"
 export EPUBICUS_MODEL="$MODEL"
+export EPUBICUS_OPENAI_BASE_URL="https://api.openai.com/v1"
 export EPUBICUS_STYLE="essay"
 export EPUBICUS_TEMPERATURE="0.3"
 export EPUBICUS_TIMEOUT_SECS="900"
 export EPUBICUS_RETRIES="3"
 export EPUBICUS_MAX_CHARS_PER_REQUEST="3500"
-export EPUBICUS_CONCURRENCY="$CONCURRENCY"
+export EPUBICUS_CONCURRENCY="1"
 export EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE="true"
 
-if [ "$USAGE_ONLY" = "0" ] && [ "$NO_RUN" = "0" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-    printf "DeepSeek API key: " >&2
-    if [ -t 0 ]; then
-        stty_orig=$(stty -g 2>/dev/null || true)
-        stty -echo 2>/dev/null || true
-        IFS= read -r DEEPSEEK_API_KEY
-        if [ -n "$stty_orig" ]; then stty "$stty_orig" 2>/dev/null || true; fi
-        printf "\n" >&2
-    else
-        IFS= read -r DEEPSEEK_API_KEY
-    fi
-    export DEEPSEEK_API_KEY
+if [ -z "${OPENAI_API_KEY:-}" ]; then
+    echo "warning: OPENAI_API_KEY is not set" >&2
 fi
 
-if [ "$USAGE_ONLY" = "0" ] && [ "$NO_RUN" = "0" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-    echo "warning: DEEPSEEK_API_KEY is not set" >&2
-fi
-
-invoke_epubicus_deepseek() {
-    set -- translate "$InputEpub" --cache-root "$CacheRoot" --keep-cache --output "$OutputEpub" "$@"
+invoke_epubicus_openai_batch() {
+    set -- run "$InputEpub" --provider openai --model "$EPUBICUS_MODEL" --cache-root "$CacheRoot" --force-prepare --poll-secs "$POLL_SECS" --output "$OutputEpub" "$@"
     if [ -n "$AutoGlossary" ]; then set -- "$@" --glossary "$AutoGlossary"; fi
+    if [ "$NO_WAIT" = "0" ]; then set -- "$@" --wait; fi
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
     if [ "$TO" -gt 0 ]; then set -- "$@" --to "$TO"; fi
-    if [ "$USAGE_ONLY" = "1" ]; then set -- "$@" --usage-only; fi
-    cargo run --release -- "$@"
+    cargo run --release -- batch "$@"
+}
+
+invoke_epubicus_openai_batch_status() {
+    cargo run --release -- batch status "$InputEpub" --cache-root "$CacheRoot"
+}
+
+invoke_epubicus_openai_batch_verify() {
+    cargo run --release -- batch verify "$InputEpub" --cache-root "$CacheRoot"
 }
 
 echo
@@ -105,10 +99,11 @@ if [ "$#" -gt 0 ]; then
     echo "ExtraArgs  = $*"
 fi
 echo
-echo "Normal DeepSeek conversion:"
-echo "invoke_epubicus_deepseek"
+echo "Batch conversion:"
+echo "invoke_epubicus_openai_batch"
 echo
 
 if [ "$NO_RUN" = "0" ]; then
-    invoke_epubicus_deepseek "$@"
+    invoke_epubicus_openai_batch "$@"
 fi
+

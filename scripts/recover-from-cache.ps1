@@ -8,7 +8,7 @@
 #
 # Usage:
 #   .\scripts\recover-from-cache.ps1 .\book.epub
-#   .\scripts\recover-from-cache.ps1 .\book.epub -CacheRoot .\.local-ollama-cache
+#   .\scripts\recover-from-cache.ps1 .\book.epub -CacheRoot .\.cache
 #   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
 #   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Concurrency 2
 #   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -DevBuild -NoRun
@@ -18,19 +18,26 @@ param(
     [Parameter(Position = 0)]
     [string]$InputPath,
 
+    [Alias("p")]
     [ValidateSet("ollama", "openai", "claude", "deepseek")]
     [string]$Provider = "ollama",
 
+    [Alias("m")]
     [string]$Model,
 
+    [Alias("c")]
     [int]$Concurrency = 0,
 
+    [Alias("cr")]
     [string]$CacheRoot,
 
+    [Alias("g")]
     [string]$Glossary,
 
+    [Alias("mn")]
     [string]$Manual,
 
+    [Alias("l")]
     [int]$Limit = 0,
 
     [int]$Page = 0,
@@ -74,11 +81,18 @@ function Resolve-CacheRoot {
     if ([string]::IsNullOrWhiteSpace($Path)) {
         return $null
     }
-    return (Resolve-Path -LiteralPath $Path).Path
+    if (Test-Path -LiteralPath $Path) {
+        return (Resolve-Path -LiteralPath $Path).Path
+    }
+    # Cache directory may not exist yet on first use; pass through so epubicus creates it.
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return $Path
+    }
+    return Join-Path (Get-Location).Path $Path
 }
 
-if ([string]::IsNullOrWhiteSpace($CacheRoot) -and $Provider -eq "deepseek") {
-    $CacheRoot = Join-Path $ProjectRoot ".deepseek-cache"
+if ([string]::IsNullOrWhiteSpace($CacheRoot)) {
+    $CacheRoot = Join-Path $ProjectRoot ".cache"
 }
 $ResolvedCacheRoot = Resolve-CacheRoot $CacheRoot
 

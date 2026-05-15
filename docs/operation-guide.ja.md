@@ -17,8 +17,8 @@
 
 ```powershell
 .\scripts\inspect-epub.ps1 .\book.epub
-.\scripts\usage-deepseek.ps1 .\book.epub 9 9
-.\scripts\page-deepseek.ps1 .\book.epub 9 9
+.\scripts\usage.ps1 .\book.epub 9 9 -Provider deepseek
+.\scripts\translate-deepseek.ps1 .\book.epub -From 9 -To 9
 ```
 
 ## 出力ファイル名
@@ -36,9 +36,9 @@ D:\books\sample.epub -> D:\books\sample_jp.epub
 epubicus は、viewport と固定配置らしいページ構造を検出した場合、自動で OPF に Kindle 向けの `fixed-layout`、`original-resolution`、`orientation-lock` を追加します。`--kindle-fixed-layout` を付けると強制追加、`--no-kindle-fixed-layout` を付けると自動追加を無効化できます。スクリプトでは第 2 引数に `fixed` または `reflow` を指定します。
 
 ```powershell
-.\scripts\rebuild-deepseek.ps1 .\book.epub
-.\scripts\rebuild-deepseek.ps1 .\book.epub fixed
-.\scripts\rebuild-deepseek.ps1 .\book.epub reflow
+.\scripts\rebuild-from-cache.ps1 .\book.epub
+.\scripts\rebuild-from-cache.ps1 .\book.epub fixed
+.\scripts\rebuild-from-cache.ps1 .\book.epub reflow
 ```
 
 通常の小説や技術書のようなリフロー EPUB に固定レイアウトメタデータを付けると、Kindle 上で文字サイズ変更や画面幅に合わせた再配置が効きにくくなります。自動判定が不要な場合は、スクリプトでは `reflow`、CLI 直接実行では `--no-kindle-fixed-layout` を使ってください。
@@ -51,36 +51,33 @@ ETA は前付けページを除外して測ります。spine 1〜3ページ目�
 
 ## ローカル Ollama
 
-PowerShell ではテンプレートをコピーして使います。コピーしたファイルは `.gitignore` 対象なので、モデル名や並列数を自分用に変更できます。
+PowerShell では `translate-ollama.ps1` を使います。
 
 ```powershell
-Copy-Item .\scripts\local-ollama-env.template.ps1 .\scripts\local-ollama-env.ps1
-.\scripts\local-ollama-env.ps1 .\book.epub -Mode page -From 9 -To 9
-.\scripts\local-ollama-env.ps1 .\book.epub
+.\scripts\translate-ollama.ps1 .\book.epub -Mode page -From 9 -To 9
+.\scripts\translate-ollama.ps1 .\book.epub
 ```
 
 キャッシュだけで EPUB を組み立てる場合:
 
 ```powershell
-.\scripts\local-ollama-env.ps1 .\book.epub -Mode cache
+.\scripts\translate-ollama.ps1 .\book.epub -Mode cache
 ```
 
 変数と関数だけ読み込む場合:
 
 ```powershell
-. .\scripts\local-ollama-env.ps1 .\book.epub -NoRun
+. .\scripts\translate-ollama.ps1 .\book.epub -NoRun
 Invoke-EpubicusLocalPageCheck -From 9 -To 9
 Invoke-EpubicusLocalFull
 Invoke-EpubicusAssembleFromCache
 ```
 
-macOS/Linux では `.sh` テンプレートを使います。
+macOS/Linux では `.sh` 版を使います。
 
 ```sh
-cp scripts/local-ollama-env.template.sh scripts/local-ollama-env.sh
-chmod +x scripts/local-ollama-env.sh
-scripts/local-ollama-env.sh ./book.epub --mode page --from 9 --to 9
-scripts/local-ollama-env.sh ./book.epub
+scripts/translate-ollama.sh ./book.epub --mode page --from 9 --to 9
+scripts/translate-ollama.sh ./book.epub
 ```
 
 ## OpenAI / Claude / DeepSeek 通常 API
@@ -88,19 +85,17 @@ scripts/local-ollama-env.sh ./book.epub
 通常 API はすぐに結果を得やすい一方、未キャッシュ部分のリクエスト数に応じて課金されます。最初は使用量確認と本文ファイル 1 個だけの試し翻訳で確認してください。
 
 ```powershell
-Copy-Item .\scripts\openai-env.template.ps1 .\scripts\openai-env.ps1
 $env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
-.\scripts\openai-env.ps1 .\book.epub -From 9 -To 9 -UsageOnly
-.\scripts\openai-env.ps1 .\book.epub -From 9 -To 9
+.\scripts\translate-openai.ps1 .\book.epub -From 9 -To 9 -UsageOnly
+.\scripts\translate-openai.ps1 .\book.epub -From 9 -To 9
 ```
 
 Claude の通常 API:
 
 ```powershell
-Copy-Item .\scripts\claude-env.template.ps1 .\scripts\claude-env.ps1
 $env:ANTHROPIC_API_KEY = Read-Host "Anthropic API key" -MaskInput
-.\scripts\claude-env.ps1 .\book.epub -From 9 -To 9 -UsageOnly
-.\scripts\claude-env.ps1 .\book.epub -From 9 -To 9
+.\scripts\translate-claude.ps1 .\book.epub -From 9 -To 9 -UsageOnly
+.\scripts\translate-claude.ps1 .\book.epub -From 9 -To 9
 ```
 
 DeepSeek の通常 API:
@@ -109,37 +104,31 @@ DeepSeek の通常 API:
 
 ```powershell
 $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
-.\scripts\usage-deepseek.ps1 .\book.epub 9 9
-.\scripts\page-deepseek.ps1 .\book.epub 9 9
-.\scripts\convert-deepseek.ps1 .\book.epub
+.\scripts\usage.ps1 .\book.epub 9 9 -Provider deepseek
+.\scripts\translate-deepseek.ps1 .\book.epub -From 9 -To 9
+.\scripts\translate-deepseek.ps1 .\book.epub
 ```
 
-`convert-deepseek.ps1` には `translate` の追加オプションをそのまま渡せます。小説向けに翻訳する場合は `--style novel`、丁寧寄りの小説文体にする場合は `--style novel-polite` を使います。
+`translate-deepseek.ps1` には `translate` の追加オプションをそのまま渡せます。小説向けに翻訳する場合は `--style novel`、丁寧寄りの小説文体にする場合は `--style novel-polite` を使います。
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub --style novel
-.\scripts\convert-deepseek.ps1 .\book.epub --style novel-polite
+.\scripts\translate-deepseek.ps1 .\book.epub --style novel
+.\scripts\translate-deepseek.ps1 .\book.epub --style novel-polite
 ```
 
-DeepSeek の model や並列数を固定で変えたい場合だけ、`deepseek-env.template.ps1` を `deepseek-env.ps1` にコピーして編集します。上の薄いラッパーは、ローカルコピーがあればそれを使い、なければ template を使います。
+DeepSeek の model や並列数を固定で変えたい場合は `scripts\translate-deepseek.ps1` を直接編集するか、CLI オプションで上書きします。
 
 macOS/Linux:
 
 ```sh
-cp scripts/openai-env.template.sh scripts/openai-env.sh
-chmod +x scripts/openai-env.sh
 export OPENAI_API_KEY="..."
-scripts/openai-env.sh ./book.epub --from 9 --to 9 --usage-only
+scripts/translate-openai.sh ./book.epub --from 9 --to 9 --usage-only
 
-cp scripts/claude-env.template.sh scripts/claude-env.sh
-chmod +x scripts/claude-env.sh
 export ANTHROPIC_API_KEY="..."
-scripts/claude-env.sh ./book.epub --from 9 --to 9 --usage-only
+scripts/translate-claude.sh ./book.epub --from 9 --to 9 --usage-only
 
 export DEEPSEEK_API_KEY="..."
-cp scripts/deepseek-env.template.sh scripts/deepseek-env.sh
-chmod +x scripts/deepseek-env.sh
-scripts/deepseek-env.sh ./book.epub --from 9 --to 9 --usage-only
+scripts/translate-deepseek.sh ./book.epub --from 9 --to 9 --usage-only
 ```
 
 ## OpenAI Batch API
@@ -147,9 +136,8 @@ scripts/deepseek-env.sh ./book.epub --from 9 --to 9 --usage-only
 Batch API は、分割、送信、待機、受信、取り込み、組み立てを分けて管理します。`batch run` はそれらをまとめて実行するオーケストレーションです。Claude Batch には対応しません。
 
 ```powershell
-Copy-Item .\scripts\openai-batch-env.template.ps1 .\scripts\openai-batch-env.ps1
 $env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
-.\scripts\openai-batch-env.ps1 .\book.epub -From 9 -To 9
+.\scripts\translate-openai-batch.ps1 .\book.epub -From 9 -To 9
 ```
 
 手動で状態を確認しながら進める場合:
@@ -198,7 +186,7 @@ cargo run --release -- translate .\book.epub --partial-from-cache --keep-cache -
 `translate` が `Recovery log:` を表示した場合は、復旧ログから不足ブロックだけ再翻訳できます。EPUB まで作り直す場合は `--rebuild` を付けます。
 
 ```powershell
-$log = ".\.batch-openai-cache\<hash>\recovery\book_jp\recovery.jsonl"
+$log = ".\.cache\<hash>\recovery\book_jp\recovery.jsonl"
 cargo run --release -- recover $log --provider ollama --model qwen3:14b --rebuild
 cargo run --release -- recover --cache .\book.epub --provider ollama --model qwen3:14b --rebuild
 ```
@@ -206,7 +194,7 @@ cargo run --release -- recover --cache .\book.epub --provider ollama --model qwe
 通常 API の cache から復旧する場合は、スクリプトを使うと cache root と同名 glossary を自動で揃えられます。DeepSeek の例:
 
 ```powershell
-.\scripts\recover-deepseek.ps1 .\book.epub
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek
 ```
 
 復旧対象を理由で絞る場合は `-Reason` を使います。主な値は次の通りです。
@@ -240,7 +228,7 @@ cargo run --release -- scan-recovery .\book.epub .\book_jp.epub --provider ollam
 出力 EPUB が `<入力名>_jp.epub` なら、スクリプトでは第 2 引数を省略できます。
 
 ```powershell
-.\scripts\scan-recover-deepseek.ps1 .\book.epub
+.\scripts\scan-and-recover.ps1 .\book.epub -Provider deepseek
 ```
 
 PowerShell の行継続記号 `` ` `` の後ろには、空白を入れないでください。
@@ -263,12 +251,12 @@ PowerShell の行継続記号 `` ` `` の後ろには、空白を入れないで
 ```
 
 ```powershell
-$log = ".\.deepseek-cache\<hash>\recovery\book_jp\recovery.jsonl"
+$log = ".\.cache\<hash>\recovery\book_jp\recovery.jsonl"
 cargo run --release -- recover $log `
   --manual .\book.manual.json `
   --provider deepseek `
   --model deepseek-v4-flash `
-  --cache-root .\.deepseek-cache `
+  --cache-root .\.cache `
   --rebuild `
   --output .\book_jp.epub `
   --glossary .\book.json
@@ -279,7 +267,7 @@ cargo run --release -- recover $log `
 通常はログパスを手で指定せず、入力 EPUB から最新ログを探すスクリプトを使えます。
 
 ```powershell
-.\scripts\manual-recover-deepseek.ps1 .\book.epub .\book.manual.json
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
 ```
 
 リモート再試行用の JSONL を作る場合:

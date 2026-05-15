@@ -1,12 +1,11 @@
 #!/usr/bin/env sh
-# epubicus Claude normal API environment template.
+# epubicus DeepSeek translate script.
 #
 # Usage:
-#   cp scripts/claude-env.template.sh scripts/claude-env.sh
-#   chmod +x scripts/claude-env.sh
-#   export ANTHROPIC_API_KEY="..."
-#   scripts/claude-env.sh ./book.epub
-#   scripts/claude-env.sh ./book.epub -- --glossary ./glossary.json
+#   chmod +x scripts/translate-deepseek.sh
+#   export DEEPSEEK_API_KEY="..."
+#   scripts/translate-deepseek.sh ./book.epub
+#   scripts/translate-deepseek.sh ./book.epub -- --glossary ./glossary.json
 
 set -eu
 
@@ -16,17 +15,17 @@ PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 INPUT_PATH=""
 FROM="0"
 TO="0"
-MODEL="claude-sonnet-4-5"
+MODEL="deepseek-v4-flash"
 CONCURRENCY="1"
 USAGE_ONLY="0"
 NO_RUN="0"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --from) FROM="$2"; shift 2 ;;
-        --to) TO="$2"; shift 2 ;;
-        --model) MODEL="$2"; shift 2 ;;
-        --concurrency) CONCURRENCY="$2"; shift 2 ;;
+        --from|-f) FROM="$2"; shift 2 ;;
+        --to|-t) TO="$2"; shift 2 ;;
+        --model|-m) MODEL="$2"; shift 2 ;;
+        --concurrency|-c) CONCURRENCY="$2"; shift 2 ;;
         --usage-only) USAGE_ONLY="1"; shift ;;
         --no-run) NO_RUN="1"; shift ;;
         --) shift; break ;;
@@ -46,7 +45,7 @@ if [ "$INPUT_BASE" = "$INPUT_FILE" ]; then OUTPUT_FILE="${INPUT_FILE}_jp"; else 
 
 export InputEpub="$INPUT_DIR/$INPUT_FILE"
 export OutputEpub="$INPUT_DIR/$OUTPUT_FILE"
-export CacheRoot="$PROJECT_ROOT/.claude-cache"
+export CacheRoot="$PROJECT_ROOT/.cache"
 AutoGlossary=""
 case " $* " in
     *" --glossary "*|*" --glossary="*|*" -g "*) ;;
@@ -56,9 +55,8 @@ case " $* " in
         fi
         ;;
 esac
-export EPUBICUS_PROVIDER="claude"
+export EPUBICUS_PROVIDER="deepseek"
 export EPUBICUS_MODEL="$MODEL"
-export EPUBICUS_CLAUDE_BASE_URL="https://api.anthropic.com/v1"
 export EPUBICUS_STYLE="essay"
 export EPUBICUS_TEMPERATURE="0.3"
 export EPUBICUS_TIMEOUT_SECS="900"
@@ -67,11 +65,25 @@ export EPUBICUS_MAX_CHARS_PER_REQUEST="3500"
 export EPUBICUS_CONCURRENCY="$CONCURRENCY"
 export EPUBICUS_PASSTHROUGH_ON_VALIDATION_FAILURE="true"
 
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "warning: ANTHROPIC_API_KEY is not set" >&2
+if [ "$USAGE_ONLY" = "0" ] && [ "$NO_RUN" = "0" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    printf "DeepSeek API key: " >&2
+    if [ -t 0 ]; then
+        stty_orig=$(stty -g 2>/dev/null || true)
+        stty -echo 2>/dev/null || true
+        IFS= read -r DEEPSEEK_API_KEY
+        if [ -n "$stty_orig" ]; then stty "$stty_orig" 2>/dev/null || true; fi
+        printf "\n" >&2
+    else
+        IFS= read -r DEEPSEEK_API_KEY
+    fi
+    export DEEPSEEK_API_KEY
 fi
 
-invoke_epubicus_claude() {
+if [ "$USAGE_ONLY" = "0" ] && [ "$NO_RUN" = "0" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    echo "warning: DEEPSEEK_API_KEY is not set" >&2
+fi
+
+invoke_epubicus_deepseek() {
     set -- translate "$InputEpub" --cache-root "$CacheRoot" --keep-cache --output "$OutputEpub" "$@"
     if [ -n "$AutoGlossary" ]; then set -- "$@" --glossary "$AutoGlossary"; fi
     if [ "$FROM" -gt 0 ]; then set -- "$@" --from "$FROM"; fi
@@ -92,11 +104,10 @@ if [ "$#" -gt 0 ]; then
     echo "ExtraArgs  = $*"
 fi
 echo
-echo "Normal Claude conversion:"
-echo "invoke_epubicus_claude"
+echo "Normal DeepSeek conversion:"
+echo "invoke_epubicus_deepseek"
 echo
 
 if [ "$NO_RUN" = "0" ]; then
-    invoke_epubicus_claude "$@"
+    invoke_epubicus_deepseek "$@"
 fi
-

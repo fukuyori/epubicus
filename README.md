@@ -7,6 +7,7 @@ It currently supports local Ollama, OpenAI, Claude, and DeepSeek providers.
 ## Documentation
 
 - [docs/README.md](docs/README.md) maps the operator guides, recovery notes, and design documents.
+- [docs/scripts-reference.ja.md](docs/scripts-reference.ja.md) is the per-script reference (purpose, arguments, usage examples) for `scripts/`.
 - [README.ja.md](README.ja.md) is the primary Japanese quick start and script-first command reference.
 - [docs/translation-workflow.ja.md](docs/translation-workflow.ja.md) is a Japanese step-by-step workflow for glossary creation, translation methods, and recovery.
 - [docs/operation-guide.ja.md](docs/operation-guide.ja.md) is the Japanese operator guide.
@@ -25,7 +26,7 @@ Inspect the EPUB first. A spine number is the reading-order number of a content 
 
 `inspect-epub.ps1` output example:
 
-Use this output to choose the first and last numbers passed to `usage-deepseek.ps1` / `page-deepseek.ps1`. Compare the chapter title in `toc` with the `Href` column in `inspect`, then choose a number that looks like real body text. For example, if the table of contents points chapter 1 to `c66.xhtml`, and `inspect` shows `c66.xhtml` as `No 9`, use `9 9` for the check range.
+Use this output to choose the first and last numbers passed to `usage.ps1` or `translate-deepseek.ps1 -From -To`. Compare the chapter title in `toc` with the `Href` column in `inspect`, then choose a number that looks like real body text. For example, if the table of contents points chapter 1 to `c66.xhtml`, and `inspect` shows `c66.xhtml` as `No 9`, use `9 9` for the check range.
 
 ```text
 [inspect]
@@ -60,10 +61,10 @@ The check range is required. Check the `inspect-epub.ps1` output and choose a nu
 Check usage. This command does not call the provider.
 
 ```powershell
-.\scripts\usage-deepseek.ps1 .\book.epub 9 9
+.\scripts\usage.ps1 .\book.epub 9 9 -Provider deepseek
 ```
 
-`usage-deepseek.ps1` output example:
+`usage.ps1` output example:
 
 It estimates how many requests and tokens would be used to translate the selected range. For an uncached range, estimated tokens are printed. If every selected block is already cached, the uncached estimate can be `0`.
 
@@ -94,13 +95,13 @@ Estimated tokens: input 2035, output 902, total 2937
 
 Translating this range for the first time is estimated to use 8 requests and about 2937 total tokens. Token counts are approximate before the provider returns actual usage.
 
-Run a trial translation for one content file. This command calls the provider and writes `.\book_jp.epub`.
+Run a trial translation for one content file. This command calls the provider and writes `.\book_jp.epub`. Use `-From` and `-To` to limit the range.
 
 ```powershell
-.\scripts\page-deepseek.ps1 .\book.epub 9 9
+.\scripts\translate-deepseek.ps1 .\book.epub -From 9 -To 9
 ```
 
-`page-deepseek.ps1` output example:
+Trial translation output example:
 
 This is the result of translating only the selected content file.
 
@@ -135,40 +136,39 @@ writes: 8
 
 There were 0 existing cache hits, 8 uncached blocks were sent to the API, and 8 successful translations were written to cache. On a rerun, `hits` should increase while `misses` and `writes` decrease.
 
-Arguments for the trial translation scripts. The first and last numbers are required. Omitting them is an error. It is not a full conversion.
+Argument forms for usage estimate and trial translation. `usage.ps1` requires the first and last numbers; `translate-deepseek.ps1` treats `-From` / `-To` as optional (omitting them runs a full conversion).
 
 ```text
-usage-deepseek.ps1 <input.epub> <from> <to>
-page-deepseek.ps1  <input.epub> <from> <to>
+usage.ps1                <input.epub> <from> <to> -Provider deepseek
+translate-deepseek.ps1   <input.epub> [-From <from> -To <to>]
 ```
 
-Run the full conversion. The output is written next to the input as `<input>_jp.epub`.
+Run the full conversion. Without `-From` / `-To` the entire spine is processed. The output is written next to the input as `<input>_jp.epub`.
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub
+.\scripts\translate-deepseek.ps1 .\book.epub
 ```
 
 If the summary prints an untranslated report or recovery log, recover only the missing blocks.
 
 ```powershell
-.\scripts\recover-deepseek.ps1 .\book.epub
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek
 ```
 
 The daily scripts run `cargo run --release -- ...`, set the standard cache root, detect a same-name glossary, and keep command lines short. Use debug `cargo run -- ...` commands only for short development checks.
 
-For local Ollama testing, a PowerShell template is also available:
+For local Ollama testing, use the dedicated script:
 
 ```powershell
-Copy-Item .\scripts\local-ollama-env.template.ps1 .\scripts\local-ollama-env.ps1
-.\scripts\local-ollama-env.ps1 .\book.epub
+.\scripts\translate-ollama.ps1 .\book.epub
 ```
 
 Useful DeepSeek scripts:
 
 ```powershell
-.\scripts\rebuild-deepseek.ps1 .\book.epub
-.\scripts\rebuild-deepseek.ps1 .\book.epub fixed
-.\scripts\manual-recover-deepseek.ps1 .\book.epub .\book.manual.json
+.\scripts\rebuild-from-cache.ps1 .\book.epub
+.\scripts\rebuild-from-cache.ps1 .\book.epub fixed
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
 ```
 
 ## Detailed Script Examples
@@ -181,83 +181,69 @@ The local Ollama script runs `cargo run --release -- ...`, sets `EPUBICUS_*` env
 
 For detailed Ollama modes, see [docs/translation-workflow.ja.md](docs/translation-workflow.ja.md).
 
-For OpenAI Batch API runs, use the matching Batch template:
+For OpenAI Batch API runs, use the matching Batch script:
 
 ```powershell
-Copy-Item .\scripts\openai-batch-env.template.ps1 .\scripts\openai-batch-env.ps1
 $env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
-.\scripts\openai-batch-env.ps1 .\book.epub
+.\scripts\translate-openai-batch.ps1 .\book.epub
 ```
 
 It also writes `.\book_jp.epub` next to the input file. Use a page range while
 checking cost and quality:
 
 ```powershell
-.\scripts\openai-batch-env.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-openai-batch.ps1 .\book.epub -From 3 -To 3
 ```
 
 To check or resume without immediately running:
 
 ```powershell
-. .\scripts\openai-batch-env.ps1 .\book.epub -NoRun
+. .\scripts\translate-openai-batch.ps1 .\book.epub -NoRun
 Invoke-EpubicusOpenAiBatchStatus
 Invoke-EpubicusOpenAiBatchVerify
 Invoke-EpubicusOpenAiBatch
 ```
 
-For normal OpenAI API, Claude API, or DeepSeek API runs, use the provider-specific templates:
+For normal OpenAI API, Claude API, or DeepSeek API runs, use the provider-specific scripts:
 
 ```powershell
-Copy-Item .\scripts\openai-env.template.ps1 .\scripts\openai-env.ps1
 $env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
-.\scripts\openai-env.ps1 .\book.epub
+.\scripts\translate-openai.ps1 .\book.epub
 
-Copy-Item .\scripts\claude-env.template.ps1 .\scripts\claude-env.ps1
 $env:ANTHROPIC_API_KEY = Read-Host "Anthropic API key" -MaskInput
-.\scripts\claude-env.ps1 .\book.epub
+.\scripts\translate-claude.ps1 .\book.epub
 
-Copy-Item .\scripts\deepseek-env.template.ps1 .\scripts\deepseek-env.ps1
 $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
-.\scripts\deepseek-env.ps1 .\book.epub
+.\scripts\translate-deepseek.ps1 .\book.epub
 ```
 
-These templates support the same page-range and usage-estimate options:
+These scripts support the same page-range and usage-estimate options:
 
 ```powershell
-.\scripts\openai-env.ps1 .\book.epub -From 3 -To 3
-.\scripts\openai-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
-.\scripts\claude-env.ps1 .\book.epub -From 3 -To 3
-.\scripts\claude-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
-.\scripts\deepseek-env.ps1 .\book.epub -From 3 -To 3
-.\scripts\deepseek-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+.\scripts\translate-openai.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-openai.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+.\scripts\translate-claude.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-claude.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+.\scripts\translate-deepseek.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-deepseek.ps1 .\book.epub -From 3 -To 3 -UsageOnly
 ```
 
-For macOS/Linux shells, use the `.sh` templates instead:
+For macOS/Linux shells, use the `.sh` versions instead:
 
 ```bash
-cp scripts/local-ollama-env.template.sh scripts/local-ollama-env.sh
-chmod +x scripts/local-ollama-env.sh
-scripts/local-ollama-env.sh ./book.epub
+scripts/translate-ollama.sh ./book.epub
 
-cp scripts/openai-env.template.sh scripts/openai-env.sh
-chmod +x scripts/openai-env.sh
 export OPENAI_API_KEY="..."
-scripts/openai-env.sh ./book.epub --from 3 --to 3 --usage-only
+scripts/translate-openai.sh ./book.epub --from 3 --to 3 --usage-only
 
-cp scripts/claude-env.template.sh scripts/claude-env.sh
-chmod +x scripts/claude-env.sh
 export ANTHROPIC_API_KEY="..."
-scripts/claude-env.sh ./book.epub --from 3 --to 3 --usage-only
+scripts/translate-claude.sh ./book.epub --from 3 --to 3 --usage-only
 
-cp scripts/deepseek-env.template.sh scripts/deepseek-env.sh
-chmod +x scripts/deepseek-env.sh
 export DEEPSEEK_API_KEY="..."
-scripts/deepseek-env.sh ./book.epub --from 3 --to 3 --usage-only
+scripts/translate-deepseek.sh ./book.epub --from 3 --to 3 --usage-only
 
-cp scripts/openai-batch-env.template.sh scripts/openai-batch-env.sh
-chmod +x scripts/openai-batch-env.sh
 export OPENAI_API_KEY="..."
-scripts/openai-batch-env.sh ./book.epub --from 3 --to 3
+scripts/translate-openai-batch.sh ./book.epub --from 3 --to 3
 ```
 
 See [docs/operation-guide.ja.md](docs/operation-guide.ja.md) for a practical
@@ -313,7 +299,7 @@ Example for an OpenAI Batch cache:
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json `
@@ -326,7 +312,7 @@ Example for a local Ollama cache:
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.local-ollama-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --partial-from-cache `
@@ -334,12 +320,14 @@ cargo run -- translate .\book.epub `
   --output .\book_jp.epub
 ```
 
+The default cache root is shared across providers (e.g. `.cache/`). The cache key includes the provider, so multiple providers can coexist in the same cache directory without collisions.
+
 If any block is written unchanged, epubicus writes `recovery\<output EPUB name>\untranslated.txt` under the cache directory. Use that file after noisy runs to inspect the page number, XHTML href, reason, and original source block for each untranslated output block. Because it lives with the cache, `cache clear` / `cache prune` can clean translation cache, batch artifacts, and recovery logs together.
 
 epubicus also writes `recovery\<output EPUB name>\recovery.jsonl`. The exact path is printed at the end of `translate` as `Recovery log:`. Use the `recover` subcommand to retry only those blocks and insert successful translations back into the normal cache.
 
 ```powershell
-$log = ".\.local-ollama-cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
+$log = ".\.cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
 cargo run -- recover $log
 ```
 
@@ -349,7 +337,7 @@ To recover and rebuild in one step, pass `--rebuild`. When every selected item i
 cargo run -- recover $log --rebuild
 ```
 
-You can also recover from the newest recovery log for an input EPUB with the helper script. With `-Provider deepseek`, it uses `.deepseek-cache` and automatically picks up `book.json` next to `book.epub` as the glossary.
+You can also recover from the newest recovery log for an input EPUB with the helper script. With `-Provider deepseek`, it uses the shared `.cache/` directory and automatically picks up `book.json` next to `book.epub` as the glossary.
 
 ```powershell
 .\scripts\recover-from-cache.ps1 .\book.epub `
@@ -369,7 +357,7 @@ Pass `--output` to write the rebuilt EPUB elsewhere. To rebuild manually instead
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.local-ollama-cache `
+  --cache-root .\.cache `
   --partial-from-cache `
   --keep-cache `
   --output .\book_jp.epub
@@ -660,13 +648,12 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
 cargo run -- test .\book.epub --from 1 --to 1 --provider deepseek --model deepseek-v4-flash
 ```
 
-To use the PowerShell template:
+To use the PowerShell script:
 
 ```powershell
-Copy-Item .\scripts\deepseek-env.template.ps1 .\scripts\deepseek-env.ps1
 $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
-.\scripts\deepseek-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
-.\scripts\deepseek-env.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-deepseek.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+.\scripts\translate-deepseek.ps1 .\book.epub -From 3 -To 3
 ```
 
 Interactive key prompt:

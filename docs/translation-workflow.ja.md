@@ -92,28 +92,22 @@ cargo run -- translate .\book.epub --from 3 --to 3 --dry-run
 
 料金をかけずに進めたい場合の基本方式です。時間はかかりますが、中断してもキャッシュから再開できます。
 
-初回だけテンプレートをコピーします。
-
-```powershell
-Copy-Item .\scripts\local-ollama-env.template.ps1 .\scripts\local-ollama-env.ps1
-```
-
 1ページだけ確認します。
 
 ```powershell
-.\scripts\local-ollama-env.ps1 .\book.epub -Mode page -From 3 -To 3
+.\scripts\translate-ollama.ps1 .\book.epub -Mode page -From 3 -To 3
 ```
 
 全体を変換します。
 
 ```powershell
-.\scripts\local-ollama-env.ps1 .\book.epub
+.\scripts\translate-ollama.ps1 .\book.epub
 ```
 
 キャッシュ済み分だけで EPUB を組み立てる場合:
 
 ```powershell
-.\scripts\local-ollama-env.ps1 .\book.epub -Mode cache
+.\scripts\translate-ollama.ps1 .\book.epub -Mode cache
 ```
 
 ### Ollama のリカバリー
@@ -123,7 +117,7 @@ Copy-Item .\scripts\local-ollama-env.template.ps1 .\scripts\local-ollama-env.ps1
 未翻訳が残った EPUB ができた場合は、復旧ログを使います。`translate` の最後に `Recovery log:` と表示されたパスを指定します。
 
 ```powershell
-$log = ".\.local-ollama-cache\<hash>\recovery\book_jp\recovery.jsonl"
+$log = ".\.cache\<hash>\recovery\book_jp\recovery.jsonl"
 cargo run -- recover $log --provider ollama --model qwen3:14b --rebuild
 ```
 
@@ -137,13 +131,11 @@ cargo run -- recover --cache .\book.epub --provider ollama --model qwen3:14b --r
 
 ```powershell
 .\scripts\recover-from-cache.ps1 .\book.epub `
-  -CacheRoot .\.local-ollama-cache `
   -Provider ollama `
   -Model qwen3:14b `
   -NoRun
 
 .\scripts\recover-from-cache.ps1 .\book.epub `
-  -CacheRoot .\.local-ollama-cache `
   -Provider ollama `
   -Model qwen3:14b
 ```
@@ -159,7 +151,6 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
 
 ```powershell
 .\scripts\scan-and-recover.ps1 .\book.epub .\book_jp.epub `
-  -CacheRoot .\.local-ollama-cache `
   -Provider ollama `
   -Model qwen3:14b
 ```
@@ -171,36 +162,34 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
 OpenAI:
 
 ```powershell
-Copy-Item .\scripts\openai-env.template.ps1 .\scripts\openai-env.ps1
 $env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
 ```
 
 まず使用量だけ確認します。
 
 ```powershell
-.\scripts\openai-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+.\scripts\translate-openai.ps1 .\book.epub -From 3 -To 3 -UsageOnly
 ```
 
 小範囲で品質を確認します。
 
 ```powershell
-.\scripts\openai-env.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-openai.ps1 .\book.epub -From 3 -To 3
 ```
 
 全体を変換します。
 
 ```powershell
-.\scripts\openai-env.ps1 .\book.epub
+.\scripts\translate-openai.ps1 .\book.epub
 ```
 
 Claude:
 
 ```powershell
-Copy-Item .\scripts\claude-env.template.ps1 .\scripts\claude-env.ps1
 $env:ANTHROPIC_API_KEY = Read-Host "Anthropic API key" -MaskInput
-.\scripts\claude-env.ps1 .\book.epub -From 3 -To 3 -UsageOnly
-.\scripts\claude-env.ps1 .\book.epub -From 3 -To 3
-.\scripts\claude-env.ps1 .\book.epub
+.\scripts\translate-claude.ps1 .\book.epub -From 3 -To 3 -UsageOnly
+.\scripts\translate-claude.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-claude.ps1 .\book.epub
 ```
 
 DeepSeek:
@@ -209,24 +198,24 @@ DeepSeek:
 
 ```powershell
 $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key" -MaskInput
-.\scripts\usage-deepseek.ps1 .\book.epub 3 3
-.\scripts\page-deepseek.ps1 .\book.epub 3 3
-.\scripts\convert-deepseek.ps1 .\book.epub
+.\scripts\usage.ps1 .\book.epub 3 3 -Provider deepseek
+.\scripts\translate-deepseek.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-deepseek.ps1 .\book.epub
 ```
 
-`convert-deepseek.ps1` には `translate` の追加オプションをそのまま渡せます。小説向けに翻訳する場合:
+`translate-deepseek.ps1` には `translate` の追加オプションをそのまま渡せます。小説向けに翻訳する場合:
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub --style novel
+.\scripts\translate-deepseek.ps1 .\book.epub --style novel
 ```
 
 丁寧寄りの小説文体にする場合:
 
 ```powershell
-.\scripts\convert-deepseek.ps1 .\book.epub --style novel-polite
+.\scripts\translate-deepseek.ps1 .\book.epub --style novel-polite
 ```
 
-DeepSeek の model や並列数を固定で変えたい場合だけ、`deepseek-env.template.ps1` を `deepseek-env.ps1` にコピーして編集します。
+DeepSeek の model や並列数を固定で変えたい場合は `scripts\translate-deepseek.ps1` を直接編集するか、CLI オプションで上書きします。
 
 ### 通常 API のリカバリー
 
@@ -241,13 +230,13 @@ cargo run -- recover --cache .\book.epub --provider ollama --model qwen3:14b --r
 DeepSeek で同じキャッシュから復旧する場合:
 
 ```powershell
-.\scripts\recover-deepseek.ps1 .\book.epub
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek
 ```
 
-`recover-from-cache.ps1` は provider に応じた既定 cache root を使います。DeepSeek では `.deepseek-cache` を使い、同じディレクトリに `book.json` があれば glossary として自動指定します。実行前に内容だけ確認する場合は `-NoRun` を付けます。
+`recover-from-cache.ps1` は共通の `.cache/` を使います。cache key に provider が含まれるため、複数 provider のキャッシュが同居しても衝突しません。同じディレクトリに `book.json` があれば glossary として自動指定します。実行前に内容だけ確認する場合は `-NoRun` を付けます。
 
 ```powershell
-.\scripts\recover-deepseek.ps1 .\book.epub -NoRun
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -NoRun
 ```
 
 ### 直接キャッシュを修正する
@@ -274,12 +263,12 @@ DeepSeek で同じキャッシュから復旧する場合:
 `--manual` を付けて `recover` を実行すると、一致した item は provider に送らず、その訳文を直接キャッシュへ書き込みます。`--rebuild` を付けると、更新後のキャッシュから EPUB も作り直します。
 
 ```powershell
-$log = ".\.deepseek-cache\<hash>\recovery\book_jp\recovery.jsonl"
+$log = ".\.cache\<hash>\recovery\book_jp\recovery.jsonl"
 cargo run -- recover $log `
   --manual .\book.manual.json `
   --provider deepseek `
   --model deepseek-v4-flash `
-  --cache-root .\.deepseek-cache `
+  --cache-root .\.cache `
   --rebuild `
   --output .\book_jp.epub `
   --glossary .\book.json
@@ -290,23 +279,21 @@ cargo run -- recover $log `
 通常は入力 EPUB から最新ログを探すスクリプトで実行します。
 
 ```powershell
-.\scripts\manual-recover-deepseek.ps1 .\book.epub .\book.manual.json
+.\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
 ```
 
-OpenAI 用キャッシュから復旧する例:
+OpenAI で翻訳した cache から、Ollama で復旧する例:
 
 ```powershell
 .\scripts\recover-from-cache.ps1 .\book.epub `
-  -CacheRoot .\.openai-cache `
   -Provider ollama `
   -Model qwen3:14b
 ```
 
-Claude 用キャッシュから復旧する例:
+Claude で翻訳した cache から、Ollama で復旧する例:
 
 ```powershell
 .\scripts\recover-from-cache.ps1 .\book.epub `
-  -CacheRoot .\.claude-cache `
   -Provider ollama `
   -Model qwen3:14b
 ```
@@ -327,7 +314,6 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
 
 ```powershell
 .\scripts\scan-and-recover.ps1 .\book.epub .\book_jp.epub `
-  -CacheRoot .\.openai-cache `
   -Provider ollama `
   -Model qwen3:14b
 ```
@@ -335,38 +321,35 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
 出力 EPUB が `<入力名>_jp.epub` の場合は、第 2 引数を省略できます。DeepSeek で検査と復旧をまとめて行う例:
 
 ```powershell
-.\scripts\scan-recover-deepseek.ps1 .\book.epub
+.\scripts\scan-and-recover.ps1 .\book.epub -Provider deepseek
 ```
 
 ## 方式3: OpenAI Batch API
 
 大きい本をまとめて処理する場合の方式です。送信後はリモート側で非同期処理されます。進捗は `batch status` / `batch health` で確認します。
 
-初回だけテンプレートをコピーします。
-
 ```powershell
-Copy-Item .\scripts\openai-batch-env.template.ps1 .\scripts\openai-batch-env.ps1
 $env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput
 ```
 
 小範囲で確認します。
 
 ```powershell
-.\scripts\openai-batch-env.ps1 .\book.epub -From 3 -To 3
+.\scripts\translate-openai-batch.ps1 .\book.epub -From 3 -To 3
 ```
 
 全体を実行します。
 
 ```powershell
-.\scripts\openai-batch-env.ps1 .\book.epub
+.\scripts\translate-openai-batch.ps1 .\book.epub
 ```
 
-このスクリプトは `.batch-openai-cache` を使います。通常の OS 標準キャッシュとは別の場所なので、キャッシュ掃除時は `--cache-root` を合わせるか、全キャッシュ掃除用スクリプトを使います。
+このスクリプトは共通の `.cache/` を使います。cache key に provider が含まれるため、通常 API のキャッシュと同居しても衝突しません。
 
 状態確認だけ行う場合:
 
 ```powershell
-. .\scripts\openai-batch-env.ps1 .\book.epub -NoRun
+. .\scripts\translate-openai-batch.ps1 .\book.epub -NoRun
 Invoke-EpubicusOpenAiBatchStatus
 Invoke-EpubicusOpenAiBatchVerify
 ```
@@ -374,19 +357,19 @@ Invoke-EpubicusOpenAiBatchVerify
 手動で段階実行する場合:
 
 ```powershell
-cargo run -- batch prepare .\book.epub --provider openai --model gpt-5-mini --cache-root .\.batch-openai-cache
-cargo run -- batch submit .\book.epub --provider openai --model gpt-5-mini --cache-root .\.batch-openai-cache
-cargo run -- batch status .\book.epub --cache-root .\.batch-openai-cache
-cargo run -- batch fetch .\book.epub --cache-root .\.batch-openai-cache
-cargo run -- batch import .\book.epub --cache-root .\.batch-openai-cache
-cargo run -- batch verify .\book.epub --cache-root .\.batch-openai-cache
+cargo run -- batch prepare .\book.epub --provider openai --model gpt-5-mini --cache-root .\.cache
+cargo run -- batch submit .\book.epub --provider openai --model gpt-5-mini --cache-root .\.cache
+cargo run -- batch status .\book.epub --cache-root .\.cache
+cargo run -- batch fetch .\book.epub --cache-root .\.cache
+cargo run -- batch import .\book.epub --cache-root .\.cache
+cargo run -- batch verify .\book.epub --cache-root .\.cache
 ```
 
 取り込み済みキャッシュから EPUB を組み立てます。
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --partial-from-cache `
@@ -394,15 +377,15 @@ cargo run -- translate .\book.epub `
   --output .\book_jp.epub
 ```
 
-同名 glossary がある場合、テンプレートスクリプトは自動で使います。手動コマンドでは必要に応じて `--glossary .\book.json` を付けます。
+同名 glossary がある場合、スクリプトは自動で使います。手動コマンドでは必要に応じて `--glossary .\book.json` を付けます。
 
 ### Batch のリカバリー
 
 まず状態を確認します。
 
 ```powershell
-cargo run -- batch health .\book.epub --cache-root .\.batch-openai-cache
-cargo run -- batch verify .\book.epub --cache-root .\.batch-openai-cache
+cargo run -- batch health .\book.epub --cache-root .\.cache
+cargo run -- batch verify .\book.epub --cache-root .\.cache
 ```
 
 一連の流れは `batch-recover-local.ps1` にまとめています。まず `-NoRun` で内容を確認します。
@@ -438,17 +421,17 @@ cargo run -- batch verify .\book.epub --cache-root .\.batch-openai-cache
 OpenAI 側の処理が完了しているのに取り込みだけ済んでいない場合:
 
 ```powershell
-cargo run -- batch fetch .\book.epub --cache-root .\.batch-openai-cache
-cargo run -- batch import .\book.epub --cache-root .\.batch-openai-cache
-cargo run -- batch verify .\book.epub --cache-root .\.batch-openai-cache
+cargo run -- batch fetch .\book.epub --cache-root .\.cache
+cargo run -- batch import .\book.epub --cache-root .\.cache
+cargo run -- batch verify .\book.epub --cache-root .\.cache
 ```
 
 failed / rejected / local_exhausted などが残る場合、少数ならローカルLLMへ回します。
 
 ```powershell
-cargo run -- batch reroute-local .\book.epub --cache-root .\.batch-openai-cache --remaining --priority short-first
-cargo run -- batch translate-local .\book.epub --cache-root .\.batch-openai-cache --provider ollama --model qwen3:14b --limit 100
-cargo run -- batch verify .\book.epub --cache-root .\.batch-openai-cache
+cargo run -- batch reroute-local .\book.epub --cache-root .\.cache --remaining --priority short-first
+cargo run -- batch translate-local .\book.epub --cache-root .\.cache --provider ollama --model qwen3:14b --limit 100
+cargo run -- batch verify .\book.epub --cache-root .\.cache
 ```
 
 fetch/import 済みで、ローカル処理だけ再実行したい場合:
@@ -466,14 +449,14 @@ EPUB の再組み立てを後回しにしたい場合:
 OpenAI Batch で再処理したい場合は、リトライ用 JSONL を作ります。
 
 ```powershell
-cargo run -- batch retry-requests .\book.epub --cache-root .\.batch-openai-cache --limit 100 --priority failed-first
+cargo run -- batch retry-requests .\book.epub --cache-root .\.cache --limit 100 --priority failed-first
 ```
 
 最終的に `effective remaining: 0` になったら、EPUB を組み立て直します。
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --partial-from-cache `
@@ -502,7 +485,7 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
 Batch の場合は、あわせて health を確認します。
 
 ```powershell
-cargo run -- batch health .\book.epub --cache-root .\.batch-openai-cache
+cargo run -- batch health .\book.epub --cache-root .\.cache
 ```
 
 目安:
@@ -517,13 +500,13 @@ effective remaining: 0
 画像と文章を固定配置している EPUB は、Send to Kindle の変換でリフロー扱いになると、画像と文章の位置がオリジナルからずれることがあります。epubicus は、viewport と固定配置らしいページ構造を検出した場合、完成後の EPUB に Kindle 向け固定レイアウトメタデータを自動追加します。
 
 ```powershell
-.\scripts\rebuild-deepseek.ps1 .\book.epub
+.\scripts\rebuild-from-cache.ps1 .\book.epub
 ```
 
 強制的に追加する場合は `--kindle-fixed-layout`、自動追加を止める場合は `--no-kindle-fixed-layout` を付けます。リフロー前提の通常 EPUB に固定レイアウトメタデータを付けると読みやすさが落ちる場合があります。
 
 ```powershell
-.\scripts\rebuild-deepseek.ps1 .\book.epub fixed
+.\scripts\rebuild-from-cache.ps1 .\book.epub fixed
 ```
 
 ## キャッシュ掃除
@@ -534,7 +517,7 @@ effective remaining: 0
 cargo run -- cache clear --all
 ```
 
-スクリプトは方式ごとに `.openai-cache`、`.batch-openai-cache`、`.local-ollama-cache`、`.claude-cache`、`.deepseek-cache` を使うため、通常キャッシュ掃除だけでは残る場合があります。まとめて確認するには:
+スクリプトは共通の `.cache/` を使います（cache key に provider が含まれるため複数 provider が同居しても衝突しません）。プロジェクト直下の `.cache/` をまとめて確認するには:
 
 ```powershell
 .\scripts\clear-all-caches.ps1 -DryRun

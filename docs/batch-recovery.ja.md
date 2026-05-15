@@ -8,7 +8,7 @@
 
 ```powershell
 cargo run -- batch health .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -18,7 +18,7 @@ cargo run -- batch health .\book.epub `
 
 ```powershell
 cargo run -- batch verify .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -37,7 +37,7 @@ cargo run -- batch verify .\book.epub `
 
 ```powershell
 cargo run -- batch import .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -47,7 +47,7 @@ cargo run -- batch import .\book.epub `
 
 ```powershell
 cargo run -- batch verify .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -59,7 +59,7 @@ cargo run -- batch verify .\book.epub `
 
 ```powershell
 cargo run -- batch reroute-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --remaining `
   --priority short-first
 ```
@@ -68,7 +68,7 @@ cargo run -- batch reroute-local .\book.epub `
 
 ```powershell
 cargo run -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --glossary .\glossary.json
@@ -80,7 +80,7 @@ cargo run -- batch translate-local .\book.epub `
 
 ```powershell
 cargo run -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --glossary .\glossary.json `
@@ -91,7 +91,7 @@ cargo run -- batch translate-local .\book.epub `
 
 ```powershell
 cargo run -- batch health .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -121,7 +121,7 @@ after translate-local:
 
 ```powershell
 cargo run -- batch verify .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -131,7 +131,7 @@ cargo run -- batch verify .\book.epub `
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json `
@@ -147,7 +147,7 @@ cargo run -- translate .\book.epub `
 `translate` が `Recovery log:` を表示した場合は、その復旧ログから不足ブロックだけを再翻訳してキャッシュへ戻せます。復旧ログはキャッシュディレクトリ配下の `recovery\<出力EPUB名>\recovery.jsonl` に作成されます。人間向けの確認用には、同じディレクトリに `untranslated.txt` も作成されます。
 
 ```powershell
-$log = ".\.batch-openai-cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
+$log = ".\.cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
 cargo run -- recover $log --list
 cargo run -- recover $log `
   --provider ollama `
@@ -197,7 +197,7 @@ epubtr --output .\book_jp_fixed.epub .\book_jp.epub "原文の未翻訳部分" "
 
 ```powershell
 cargo run -- batch retry-requests .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --limit 100 `
   --priority failed-first
 ```

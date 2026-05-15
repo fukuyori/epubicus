@@ -1,11 +1,10 @@
-# Advanced scan/recovery helper. Prefer provider-specific wrappers such as
-# scan-deepseek.ps1 and scan-recover-deepseek.ps1 for daily use.
-#
 # Scan a translated EPUB for untranslated-looking blocks and optionally recover.
 #
-# Usage:
-#   .\scripts\scan-and-recover.ps1 .\book.epub .\book_jp.epub -NoRun
-#   .\scripts\scan-and-recover.ps1 .\book.epub -Provider deepseek -NoRun
+# Usage (-Provider is required):
+#   .\scripts\scan-and-recover.ps1 .\book.epub -Provider deepseek            # scan + recover
+#   .\scripts\scan-and-recover.ps1 .\book.epub -Provider deepseek -ScanOnly  # scan only (no API call)
+#   .\scripts\scan-and-recover.ps1 .\book.epub -Provider claude
+#   .\scripts\scan-and-recover.ps1 .\book.epub .\book_jp.epub -Provider deepseek -NoRun
 #   .\scripts\scan-and-recover.ps1 .\book.epub -Provider deepseek -KindleFixedLayout
 
 param(
@@ -15,15 +14,21 @@ param(
     [Parameter(Position = 1)]
     [string]$OutputPath,
 
+    [Parameter(Mandatory = $true)]
+    [Alias("p")]
     [ValidateSet("ollama", "openai", "claude", "deepseek")]
-    [string]$Provider = "ollama",
+    [string]$Provider,
 
+    [Alias("m")]
     [string]$Model,
 
+    [Alias("cr")]
     [string]$CacheRoot,
 
+    [Alias("g")]
     [string]$Glossary,
 
+    [Alias("l")]
     [int]$Limit = 0,
 
     [Alias("ListOnly")]
@@ -61,12 +66,7 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 $OutputEpub = (Resolve-Path -LiteralPath $OutputPath).Path
 
 if ([string]::IsNullOrWhiteSpace($CacheRoot)) {
-    $CacheRoot = switch ($Provider) {
-        "openai" { Join-Path $ProjectRoot ".openai-cache" }
-        "claude" { Join-Path $ProjectRoot ".claude-cache" }
-        "deepseek" { Join-Path $ProjectRoot ".deepseek-cache" }
-        default { Join-Path $ProjectRoot ".local-ollama-cache" }
-    }
+    $CacheRoot = Join-Path $ProjectRoot ".cache"
 }
 if (Test-Path -LiteralPath $CacheRoot) {
     $CacheRoot = (Resolve-Path -LiteralPath $CacheRoot).Path

@@ -18,7 +18,7 @@
 
 ```powershell
 cargo run -- batch reroute-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --remaining `
   --priority short-first
 ```
@@ -27,7 +27,7 @@ cargo run -- batch reroute-local .\book.epub `
 
 ```powershell
 cargo run --release -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --glossary .\glossary.json
@@ -38,7 +38,7 @@ OpenAI の通常 API を使う場合も同じコマンド面ですが、API キ�
 ```powershell
 $env:OPENAI_API_KEY = "..."
 cargo run --release -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -418,7 +418,7 @@ translation validation failed after 4 attempt(s): translation validation failed:
 
 ```powershell
 cargo run --release -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --glossary .\glossary.json
@@ -430,7 +430,7 @@ cargo run --release -- batch translate-local .\book.epub `
 
 ```powershell
 cargo run -- batch retry-requests .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --limit 100 `
   --priority failed-first
 ```
@@ -490,7 +490,7 @@ cargo run -- scan-recovery .\book.epub .\book_jp.epub --provider ollama --model 
 
 ```powershell
 cargo run --release -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --glossary .\glossary.json
@@ -500,7 +500,7 @@ cargo run --release -- batch translate-local .\book.epub `
 
 ```powershell
 cargo run -- batch retry-requests .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --limit 100 `
   --priority failed-first
 ```
@@ -515,7 +515,7 @@ cargo run -- recover $log --provider ollama --model qwen3:14b
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --partial-from-cache `
   --keep-cache `
   --output .\book_jp.epub

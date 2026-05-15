@@ -51,6 +51,8 @@ function Get-DefaultCacheRoot {
 
 $candidateRoots = @(
     (Get-DefaultCacheRoot),
+    (Join-Path $ProjectRoot ".cache"),
+    # Legacy provider-specific caches (kept for migration; harmless if absent).
     (Join-Path $ProjectRoot ".epubicus-cache"),
     (Join-Path $ProjectRoot ".openai-cache"),
     (Join-Path $ProjectRoot ".batch-openai-cache"),

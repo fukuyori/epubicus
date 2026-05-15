@@ -8,7 +8,7 @@ An `ERROR` exit does not necessarily mean the remote OpenAI Batch job failed. Fi
 
 ```powershell
 cargo run -- batch health .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -18,7 +18,7 @@ Then check artifact and cache consistency.
 
 ```powershell
 cargo run -- batch verify .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -37,7 +37,7 @@ If only `batch verify` failed, or if `cache_conflict` remains, do not resubmit t
 
 ```powershell
 cargo run -- batch import .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -47,7 +47,7 @@ Then verify again.
 
 ```powershell
 cargo run -- batch verify .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -59,7 +59,7 @@ If `rejected` or `failed` items remain, route only those unfinished items to `lo
 
 ```powershell
 cargo run -- batch reroute-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --remaining `
   --priority short-first
 ```
@@ -68,7 +68,7 @@ Translate only the `local_pending` items with a local provider.
 
 ```powershell
 cargo run -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --glossary .\glossary.json
@@ -78,7 +78,7 @@ For long runs, add `--limit` and repeat in chunks.
 
 ```powershell
 cargo run -- batch translate-local .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider ollama `
   --model qwen3:14b `
   --glossary .\glossary.json `
@@ -89,7 +89,7 @@ Check progress with `batch health`.
 
 ```powershell
 cargo run -- batch health .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -117,7 +117,7 @@ After filling the remaining items, verify again.
 
 ```powershell
 cargo run -- batch verify .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json
@@ -127,7 +127,7 @@ If verify is clean, rebuild the EPUB from the cache.
 
 ```powershell
 cargo run -- translate .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --provider openai `
   --model gpt-5-mini `
   --glossary .\glossary.json `
@@ -143,7 +143,7 @@ This condition, `recover` leaving items in `failed.jsonl`, and `scan-recovery` d
 If `translate` printed `Recovery log:`, retry only those blocks and write successful translations back into the cache. The recovery log is written under the cache directory as `recovery\<output EPUB name>\recovery.jsonl`. The same directory also contains `untranslated.txt` for human inspection.
 
 ```powershell
-$log = ".\.batch-openai-cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
+$log = ".\.cache\0123456789abcdef0123456789abcdef\recovery\book_jp\recovery.jsonl"
 cargo run -- recover $log --list
 cargo run -- recover $log `
   --provider ollama `
@@ -193,7 +193,7 @@ If you prefer to resubmit unfinished items to OpenAI Batch instead of filling th
 
 ```powershell
 cargo run -- batch retry-requests .\book.epub `
-  --cache-root .\.batch-openai-cache `
+  --cache-root .\.cache `
   --limit 100 `
   --priority failed-first
 ```

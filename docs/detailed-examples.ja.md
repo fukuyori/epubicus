@@ -63,19 +63,19 @@ cargo run --release -- translate .\book.epub -o .\book.partial-ja.epub --partial
 通常は自動判定のまま再生成します。
 
 ```powershell
-.\scripts\rebuild-deepseek.ps1 .\book.epub
+.\scripts\rebuild-from-cache.ps1 .\book.epub
 ```
 
 固定レイアウトメタデータを強制追加する例:
 
 ```powershell
-.\scripts\rebuild-deepseek.ps1 .\book.epub fixed
+.\scripts\rebuild-from-cache.ps1 .\book.epub fixed
 ```
 
 自動判定を止める例:
 
 ```powershell
-.\scripts\rebuild-deepseek.ps1 .\book.epub reflow
+.\scripts\rebuild-from-cache.ps1 .\book.epub reflow
 ```
 
 通常のリフロー EPUB に固定レイアウトメタデータを付けると、Kindle 側で文字サイズ変更などの読みやすさが落ちる場合があります。自動判定は強めの条件にしていますが、必要に応じてスクリプトでは `reflow`、CLI 直接実行では `--no-kindle-fixed-layout` で無効化してください。
