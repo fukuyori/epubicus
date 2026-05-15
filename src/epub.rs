@@ -216,6 +216,7 @@ fn read_opf(opf_path: &Path, opf_dir: &Path) -> Result<OpfData> {
 
 pub(crate) fn count_xhtml_blocks(path: &Path) -> Result<usize> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source = crate::xhtml::normalize_void_elements(source);
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -264,6 +265,7 @@ pub(crate) fn find_ncx_item(manifest: &[ManifestItem]) -> Option<&ManifestItem> 
 
 pub(crate) fn read_nav_toc(path: &Path) -> Result<Vec<TocEntry>> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source = crate::xhtml::normalize_void_elements(source);
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -696,7 +698,8 @@ fn read_xhtml_viewport(path: &Path) -> Result<Option<String>> {
 }
 
 fn xhtml_viewport_from_str(source: &str) -> Result<Option<String>> {
-    let mut reader = Reader::from_reader(Cursor::new(source));
+    let normalized = crate::xhtml::normalize_void_elements(source.as_bytes().to_vec());
+    let mut reader = Reader::from_reader(Cursor::new(normalized));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     loop {

@@ -578,6 +578,7 @@ fn estimate_xhtml_usage(
     estimate: &mut UsageEstimate,
 ) -> Result<()> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source = crate::xhtml::normalize_void_elements(source);
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -679,6 +680,7 @@ fn count_xhtml_progress_work(
     count_eta_chars: bool,
 ) -> Result<ProgressWork> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source = crate::xhtml::normalize_void_elements(source);
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();

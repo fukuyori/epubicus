@@ -2,6 +2,13 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.4.4 - 2026-05-15
+
+### Fixed
+
+- XHTML parser no longer rejects EPUBs that use HTML5 void-element syntax (`<img>`, `<br>`, `<hr>`, etc. without a self-closing slash). Source bytes are normalized to self-closing form before parsing.
+- Stale-lock detection now works on non-English Windows locales. The `tasklist` fallback no longer relies on the English `INFO:` prefix and uses the CSV double-quote prefix instead.
+
 ## 0.4.3 - 2026-05-08
 
 ### Added
@@ -15,6 +22,7 @@ All notable changes to epubicus are documented in this file.
 - Translation prompts now use the EPUB source language hint when available and fall back to automatic source-language detection.
 - Glossary output now records the detected source language instead of assuming English.
 - Validation now treats unchanged non-Japanese source text as untranslated across multilingual inputs.
+- Scan recovery now hides per-block suspicious-output messages unless `--verbose` is used.
 
 ## 0.4.2 - 2026-05-06
 

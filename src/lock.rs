@@ -131,6 +131,9 @@ fn is_stale_lock(metadata: &LockMetadata) -> bool {
     let Some(pid) = metadata.pid else {
         return false;
     };
+    if pid == std::process::id() {
+        return false;
+    }
     let Some(hostname) = metadata.hostname.as_deref() else {
         return false;
     };
@@ -234,7 +237,7 @@ fn process_snapshot_fallback(pid: u32) -> Option<ProcessSnapshot> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let line = text.lines().next()?.trim();
-    if line.is_empty() || line.starts_with("INFO:") {
+    if !line.starts_with('"') {
         return None;
     }
     Some(ProcessSnapshot {

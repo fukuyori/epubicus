@@ -44,6 +44,144 @@ enum XhtmlPart {
     },
 }
 
+const VOID_ELEMENTS: &[&[u8]] = &[
+    b"area", b"base", b"br", b"col", b"embed", b"hr", b"img", b"input", b"link", b"meta",
+    b"param", b"source", b"track", b"wbr",
+];
+
+/// Convert HTML void-element open tags (`<img>`, `<br>`, ...) into self-closing
+/// XHTML form (`<img />`) so a strict XML parser doesn't fail on EPUBs that use
+/// HTML5 syntax. Already self-closed tags and non-void elements are untouched.
+pub(crate) fn normalize_void_elements(source: Vec<u8>) -> Vec<u8> {
+    let n = source.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        if source[i] != b'<' {
+            out.push(source[i]);
+            i += 1;
+            continue;
+        }
+        if starts_with(&source, i, b"<!--") {
+            let stop = find_subslice(&source, i + 4, b"-->")
+                .map(|p| p + 3)
+                .unwrap_or(n);
+            out.extend_from_slice(&source[i..stop]);
+            i = stop;
+            continue;
+        }
+        if starts_with(&source, i, b"<![CDATA[") {
+            let stop = find_subslice(&source, i + 9, b"]]>")
+                .map(|p| p + 3)
+                .unwrap_or(n);
+            out.extend_from_slice(&source[i..stop]);
+            i = stop;
+            continue;
+        }
+        if starts_with(&source, i, b"<!") || starts_with(&source, i, b"<?") {
+            let stop = source[i..]
+                .iter()
+                .position(|&c| c == b'>')
+                .map(|p| i + p + 1)
+                .unwrap_or(n);
+            out.extend_from_slice(&source[i..stop]);
+            i = stop;
+            continue;
+        }
+        if i + 1 < n && source[i + 1] == b'/' {
+            let stop = source[i..]
+                .iter()
+                .position(|&c| c == b'>')
+                .map(|p| i + p + 1)
+                .unwrap_or(n);
+            out.extend_from_slice(&source[i..stop]);
+            i = stop;
+            continue;
+        }
+        let name_start = i + 1;
+        let mut name_end = name_start;
+        while name_end < n {
+            let c = source[name_end];
+            if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b':' {
+                name_end += 1;
+            } else {
+                break;
+            }
+        }
+        if name_end == name_start {
+            out.push(b'<');
+            i += 1;
+            continue;
+        }
+        let name = &source[name_start..name_end];
+        let is_void = VOID_ELEMENTS.iter().any(|v| name.eq_ignore_ascii_case(v));
+        let mut j = name_end;
+        let mut quote: Option<u8> = None;
+        let mut gt: Option<usize> = None;
+        while j < n {
+            let c = source[j];
+            match quote {
+                Some(q) => {
+                    if c == q {
+                        quote = None;
+                    }
+                    j += 1;
+                }
+                None => {
+                    if c == b'"' || c == b'\'' {
+                        quote = Some(c);
+                        j += 1;
+                    } else if c == b'>' {
+                        gt = Some(j);
+                        break;
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+        }
+        let Some(gt_pos) = gt else {
+            out.extend_from_slice(&source[i..]);
+            return out;
+        };
+        let mut k = gt_pos;
+        while k > i && source[k - 1].is_ascii_whitespace() {
+            k -= 1;
+        }
+        let already_self_closed = k > i && source[k - 1] == b'/';
+        if is_void && !already_self_closed {
+            out.extend_from_slice(&source[i..gt_pos]);
+            let needs_space = out
+                .last()
+                .map(|c| !c.is_ascii_whitespace())
+                .unwrap_or(false);
+            if needs_space {
+                out.push(b' ');
+            }
+            out.push(b'/');
+            out.push(b'>');
+        } else {
+            out.extend_from_slice(&source[i..=gt_pos]);
+        }
+        i = gt_pos + 1;
+    }
+    out
+}
+
+fn starts_with(src: &[u8], at: usize, prefix: &[u8]) -> bool {
+    src.len() >= at + prefix.len() && &src[at..at + prefix.len()] == prefix
+}
+
+fn find_subslice(src: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
+    if start > src.len() || needle.is_empty() {
+        return None;
+    }
+    src[start..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| start + p)
+}
+
 pub(crate) fn translate_xhtml_file(
     path: &Path,
     translator: &mut Translator,
@@ -54,6 +192,7 @@ pub(crate) fn translate_xhtml_file(
     mut untranslated_report: Option<&mut UntranslatedReport>,
 ) -> Result<usize> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source = normalize_void_elements(source);
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::new());
@@ -422,4 +561,73 @@ pub(crate) fn write_events<W: Write>(
         writer.write_event(event.clone())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn norm(s: &str) -> String {
+        String::from_utf8(normalize_void_elements(s.as_bytes().to_vec())).unwrap()
+    }
+
+    #[test]
+    fn rewrites_html_void_img_to_self_closing() {
+        assert_eq!(
+            norm(r#"<p>foo <img src="x.png" alt=">"> bar</p>"#),
+            r#"<p>foo <img src="x.png" alt=">" /> bar</p>"#,
+        );
+    }
+
+    #[test]
+    fn leaves_already_self_closed_void_alone() {
+        let s = r#"<p>x<br/><hr /><img src="a"/></p>"#;
+        assert_eq!(norm(s), s);
+    }
+
+    #[test]
+    fn leaves_non_void_elements_alone() {
+        let s = "<p>hello <span>world</span></p>";
+        assert_eq!(norm(s), s);
+    }
+
+    #[test]
+    fn case_insensitive_void_match() {
+        assert_eq!(norm("<P><IMG src=\"a\"></P>"), "<P><IMG src=\"a\" /></P>");
+    }
+
+    #[test]
+    fn preserves_comments_and_cdata() {
+        let s = "<!-- <img src=\"a\"> --><![CDATA[<img>]]><img>";
+        assert_eq!(
+            norm(s),
+            "<!-- <img src=\"a\"> --><![CDATA[<img>]]><img />",
+        );
+    }
+
+    #[test]
+    fn preserves_xml_declaration_and_doctype() {
+        let s = "<?xml version=\"1.0\"?><!DOCTYPE html><html><body><br></body></html>";
+        assert_eq!(
+            norm(s),
+            "<?xml version=\"1.0\"?><!DOCTYPE html><html><body><br /></body></html>",
+        );
+    }
+
+    #[test]
+    fn parser_no_longer_chokes_on_unclosed_img_in_paragraph() -> Result<()> {
+        let raw = br#"<p>before <img src="a.png" alt="x"> after</p>"#;
+        let normalized = normalize_void_elements(raw.to_vec());
+        let mut reader = Reader::from_reader(Cursor::new(normalized));
+        reader.config_mut().trim_text(false);
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf)? {
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        Ok(())
+    }
 }

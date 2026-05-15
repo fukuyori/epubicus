@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Process | Where-Object { $_.ProcessName -match 'cargo|rustc|link|epubicus' } | Select-Object Id, ProcessName, StartTime, CPU | Format-Table -AutoSize)",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"ProcessId = 999999\" -ErrorAction SilentlyContinue; \"---\"; tasklist /FI \"PID eq 999999\" /FO CSV /NH 2>&1; \"---\"; \"exit code: $LASTEXITCODE\")",
+      "PowerShell($out = & cmd /c \"tasklist /FI `\"PID eq 999999`\" /FO CSV /NH 2>nul\"; \"STDOUT START\"; $out; \"STDOUT END\"; \"len: $\\($out.Length\\)\")",
+      "Bash(./target/debug/deps/epubicus-35741ba2049a639f.exe --test-threads=1 --nocapture lock::tests::acquire_nowait_replaces_stale_lock)"
+    ]
+  }
+}

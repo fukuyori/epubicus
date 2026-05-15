@@ -824,22 +824,9 @@ mod tests {
     }
 
     #[test]
-    fn reference_like_untranslated_segment_is_exhausted() {
+    fn reference_like_untranslated_segment_is_allowed_as_passthrough() {
         let source = "⟦E1⟧6⟦/E1⟧. Michael Lierow, Sebastian Jannsen, and Joris D’Inca, “Amazon Is Using Logistics to Lead a Retail Revolution,” ⟦E2⟧Forbes⟦/E2⟧ (February 21, 2016), ⟦E3⟧https://www.forbes.com/example⟦/E3⟧";
-        let err = crate::translator::validate_translation_response(source, source).unwrap_err();
-        assert!(should_exhaust_local_batch_error(
-            &err,
-            source,
-            crate::usage::ApiUsage::default(),
-            crate::usage::ApiUsage::default(),
-        ));
-        let text = local_batch_error_text(
-            &err,
-            source,
-            crate::usage::ApiUsage::default(),
-            crate::usage::ApiUsage::default(),
-        );
-        assert!(text.contains("suggested_action=inspect_reference_or_try_another_provider"));
+        assert!(crate::translator::validate_translation_response(source, source).is_ok());
     }
 
     fn test_work_item(state: &str) -> WorkItem {

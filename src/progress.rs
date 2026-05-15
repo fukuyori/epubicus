@@ -276,17 +276,13 @@ mod tests {
         let mut progress = ProgressReporter::new(7_810, 4_998, 100_000).unwrap();
         progress.set_page(4, 28);
         progress.set_provider_batch(0, 2_812, 1);
-        progress.model_started = Some(Instant::now() - Duration::from_secs(14 * 60 * 60));
         progress.model_chars = 90_000;
 
         let remaining_chars = progress
             .total_model_chars
             .saturating_sub(progress.model_chars);
-        let eta_by_char = seconds_per_unit(
-            progress.model_started.unwrap().elapsed(),
-            progress.model_chars,
-        )
-        .unwrap()
+        let eta_by_char = seconds_per_unit(Duration::from_secs(14 * 60 * 60), progress.model_chars)
+            .unwrap()
             * remaining_chars as f64;
 
         assert_eq!(remaining_chars, 10_000);

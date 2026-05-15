@@ -13,6 +13,7 @@ use crate::{
 };
 
 pub(crate) fn scan_recovery_command(args: ScanRecoveryArgs) -> Result<()> {
+    let verbose = args.common.verbose;
     let input_book = unpack_epub(&args.input)?;
     let output_book = unpack_epub(&args.output)?;
     if input_book.spine.len() != output_book.spine.len() {
@@ -76,10 +77,12 @@ pub(crate) fn scan_recovery_command(args: ScanRecoveryArgs) -> Result<()> {
                 source,
                 Some(error.as_str()),
             );
-            eprintln!(
-                "recoverable error: p{} b{} {} detected suspicious output ({})",
-                record.page_no, record.block_index, record.href, record.reason
-            );
+            if verbose {
+                eprintln!(
+                    "recoverable error: p{} b{} {} detected suspicious output ({})",
+                    record.page_no, record.block_index, record.href, record.reason
+                );
+            }
             report.record(&record)?;
             suspicious += 1;
             if args.limit.is_some_and(|limit| suspicious >= limit) {
@@ -141,6 +144,7 @@ fn collect_blocks(item: &SpineItem) -> Result<Vec<String>> {
 }
 
 fn collect_blocks_from_bytes(source: &[u8]) -> Result<Vec<String>> {
+    let source = crate::xhtml::normalize_void_elements(source.to_vec());
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();

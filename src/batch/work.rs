@@ -15,6 +15,7 @@ pub(super) fn collect_page_work_items(
     out: &mut Vec<PreparedItem>,
 ) -> Result<()> {
     let source = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source = crate::xhtml::normalize_void_elements(source);
     let mut reader = Reader::from_reader(Cursor::new(source));
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
