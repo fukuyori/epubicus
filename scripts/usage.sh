@@ -34,6 +34,10 @@ NO_RUN="0"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0"
+            exit 0
+            ;;
         --provider|-p) PROVIDER="$2"; shift 2 ;;
         --model|-m) MODEL="$2"; shift 2 ;;
         --cache-root|-cr) CACHE_ROOT="$2"; shift 2 ;;

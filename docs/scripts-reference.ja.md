@@ -19,6 +19,31 @@
 API 呼び出しの有無は各節で明記する。
 すべてのスクリプトに `.ps1` (PowerShell) 版と `.sh` (POSIX shell) 版がある。
 
+## ヘルプ表示
+
+すべてのスクリプトに `-h` / `--help`（PowerShell では `-Help` / `-h`）フラグがあります。実行するとファイル先頭のコメントブロック（用法・引数説明）を表示して終了します。
+
+```powershell
+.\scripts\translate-deepseek.ps1 -Help
+.\scripts\usage.ps1 -h
+```
+
+```sh
+scripts/translate-deepseek.sh --help
+scripts/usage.sh -h
+```
+
+## 未翻訳ブロックの扱い
+
+`translate` / `rebuild-from-cache` / `recover-from-cache` 実行後に未翻訳ブロックが残った場合:
+
+- **EPUB は出力される**（該当ブロックは原文がそのまま入る）
+- メッセージは `warning:` 接頭辞で表示
+- **終了コード 0（正常終了）** — 自動化スクリプトの動作を止めない
+- `recovery.jsonl` に未翻訳ブロックが記録され、後で `recover-from-cache` で再試行可能
+
+致命的エラー（EPUB を出力できない、ロック競合など）のみ `error:` + 終了コード 1 となります。
+
 ## オプションの短縮エイリアス
 
 よく使うパラメータには PowerShell の `[Alias()]` および shell の short option が設定されている。両者で同じ短縮表記が使える。

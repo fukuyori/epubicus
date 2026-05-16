@@ -7,43 +7,66 @@
 #   .\scripts\scan-and-recover.ps1 .\book.epub .\book_jp.epub -Provider deepseek -NoRun
 #   .\scripts\scan-and-recover.ps1 .\book.epub -Provider deepseek -KindleFixedLayout
 
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-    [Parameter(Position = 0)]
+    [Parameter(Position = 0, ParameterSetName = 'Run')]
     [string]$InputPath,
 
-    [Parameter(Position = 1)]
+    [Parameter(Position = 1, ParameterSetName = 'Run')]
     [string]$OutputPath,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
     [Alias("p")]
     [ValidateSet("ollama", "openai", "claude", "deepseek")]
     [string]$Provider,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("m")]
     [string]$Model,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("cr")]
     [string]$CacheRoot,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("g")]
     [string]$Glossary,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("l")]
     [int]$Limit = 0,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("ListOnly")]
     [switch]$ScanOnly,
 
+    [Parameter(ParameterSetName = 'Run')]
     [switch]$NoRebuild,
 
+    [Parameter(ParameterSetName = 'Run')]
     [switch]$KindleFixedLayout,
 
+    [Parameter(ParameterSetName = 'Run')]
     [switch]$NoKindleFixedLayout,
 
+    [Parameter(ParameterSetName = 'Run')]
     [string]$EpubicusExe,
 
-    [switch]$NoRun
+    [Parameter(ParameterSetName = 'Run')]
+    [switch]$NoRun,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Help')]
+    [Alias("h")]
+    [switch]$Help
 )
+
+if ($Help) {
+    foreach ($line in (Get-Content -LiteralPath $PSCommandPath)) {
+        if ($line -match '^#') { ($line -replace '^#\s?', '') }
+        else { break }
+    }
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 

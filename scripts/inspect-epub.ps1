@@ -8,8 +8,19 @@ param(
     [Parameter(Position = 0)]
     [string]$InputPath,
 
-    [switch]$NoRun
+    [switch]$NoRun,
+
+    [Alias("h")]
+    [switch]$Help
 )
+
+if ($Help) {
+    foreach ($line in (Get-Content -LiteralPath $PSCommandPath)) {
+        if ($line -match '^#') { ($line -replace '^#\s?', '') }
+        else { break }
+    }
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 

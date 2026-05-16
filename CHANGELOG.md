@@ -2,6 +2,30 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.4.5 - 2026-05-16
+
+### Changed
+
+- Untranslated blocks remaining after rebuild are now reported as `warning:` with exit code 0 (previously `error:` with exit code 2). The EPUB is produced either way; only true fatal errors (cannot write EPUB) keep a non-zero exit code.
+- Reorganized `scripts/`: renamed `*-env.template.{ps1,sh}` to `translate-<provider>.{ps1,sh}` (dropped `local-` prefix for ollama).
+- Unified the cache root to `<ProjectRoot>/.cache/` for all scripts. Provider is included in `cache_key`, so multiple providers can coexist safely.
+
+### Added
+
+- New generic scripts: `usage.{ps1,sh}` and `rebuild-from-cache.{ps1,sh}` (with provider/model auto-detection from cache).
+- Shell counterparts for `inspect-epub` / `create-glossary` / `recover-from-cache` / `scan-and-recover` / `batch-recover-local` / `clear-all-caches`.
+- `-h` / `--help` flag on every script (prints the leading comment block).
+- Short option aliases for common parameters: `-p` (Provider), `-m` (Model), `-f` (From), `-t` (To), `-c` (Concurrency), `-g` (Glossary), `-l` (Limit), `-mn` (Manual), `-s` (Style), `-cr` (CacheRoot).
+- `docs/scripts-reference.ja.md` (per-script reference) and `docs/script-cleanup-plan.ja.md` (audit and migration notes).
+
+### Removed
+
+- Provider-specific thin wrappers that duplicated body scripts: `convert-deepseek` / `page-deepseek` / `usage-deepseek` / `recover-deepseek` / `recover-openai` / `manual-recover-deepseek` / `scan-deepseek` / `scan-recover-deepseek` / `rebuild-deepseek`. Use the unified bodies (`translate-<provider>`, `usage`, `recover-from-cache`, `scan-and-recover`, `rebuild-from-cache`) directly.
+
+### Fixed
+
+- `scan-and-recover` now requires `-Provider` explicitly (no implicit ollama default), aligning with `usage` for safer invocation in multi-provider environments.
+
 ## 0.4.4 - 2026-05-15
 
 ### Fixed

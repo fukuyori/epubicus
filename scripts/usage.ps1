@@ -17,34 +17,52 @@
 # This command does not call the provider API. It only prints estimated request
 # counts and input/output tokens for the selected range.
 
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-    [Parameter(Position = 0)]
+    [Parameter(Position = 0, ParameterSetName = 'Run')]
     [string]$InputPath,
 
-    [Parameter(Position = 1)]
+    [Parameter(Position = 1, ParameterSetName = 'Run')]
     [int]$From = 0,
 
-    [Parameter(Position = 2)]
+    [Parameter(Position = 2, ParameterSetName = 'Run')]
     [int]$To = 0,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
     [Alias("p")]
     [ValidateSet("ollama", "openai", "claude", "deepseek")]
     [string]$Provider,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("m")]
     [string]$Model,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("cr")]
     [string]$CacheRoot,
 
+    [Parameter(ParameterSetName = 'Run')]
     [Alias("g")]
     [string]$Glossary,
 
+    [Parameter(ParameterSetName = 'Run')]
     [switch]$DevBuild,
 
-    [switch]$NoRun
+    [Parameter(ParameterSetName = 'Run')]
+    [switch]$NoRun,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Help')]
+    [Alias("h")]
+    [switch]$Help
 )
+
+if ($Help) {
+    foreach ($line in (Get-Content -LiteralPath $PSCommandPath)) {
+        if ($line -match '^#') { ($line -replace '^#\s?', '') }
+        else { break }
+    }
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 

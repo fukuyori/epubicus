@@ -1,18 +1,17 @@
-# Advanced recovery helper. Prefer provider-specific wrappers such as
-# recover-deepseek.ps1 and manual-recover-deepseek.ps1 for daily use.
+# Provider-agnostic recovery script. Reads the newest recovery log for an input
+# EPUB and re-translates failed blocks via the chosen provider (or skips API
+# calls when --Manual is given to write a hand-edited JSON into the cache).
 #
-# Recover blocks from the newest recovery log for an input EPUB.
-#
-# This is useful after normal translate / partial-from-cache runs when epubicus
-# printed a Recovery log path, but you want to avoid locating it manually.
+# This is the body script used after a normal translate / partial-from-cache run
+# emits a Recovery log path.
 #
 # Usage:
-#   .\scripts\recover-from-cache.ps1 .\book.epub
-#   .\scripts\recover-from-cache.ps1 .\book.epub -CacheRoot .\.cache
-#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Manual .\book.manual.json
-#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -Concurrency 2
-#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -DevBuild -NoRun
-#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek -NoRun
+#   .\scripts\recover-from-cache.ps1 .\book.epub -Provider deepseek
+#   .\scripts\recover-from-cache.ps1 .\book.epub -p deepseek -m deepseek-v4-pro
+#   .\scripts\recover-from-cache.ps1 .\book.epub -p deepseek -Manual .\book.manual.json
+#   .\scripts\recover-from-cache.ps1 .\book.epub -p openai -CacheRoot .\.cache
+#   .\scripts\recover-from-cache.ps1 .\book.epub -p deepseek -List
+#   .\scripts\recover-from-cache.ps1 .\book.epub -p deepseek -DevBuild -NoRun
 
 param(
     [Parameter(Position = 0)]
@@ -58,8 +57,19 @@ param(
 
     [switch]$DevBuild,
 
-    [switch]$NoRun
+    [switch]$NoRun,
+
+    [Alias("h")]
+    [switch]$Help
 )
+
+if ($Help) {
+    foreach ($line in (Get-Content -LiteralPath $PSCommandPath)) {
+        if ($line -match '^#') { ($line -replace '^#\s?', '') }
+        else { break }
+    }
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 

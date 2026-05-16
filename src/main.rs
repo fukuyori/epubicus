@@ -92,8 +92,6 @@ struct Stats {
     blocks_translated: usize,
 }
 
-const EXIT_RECOVERABLE_ERROR: u8 = 2;
-
 #[derive(Debug)]
 struct RecoverableError {
     message: String,
@@ -123,10 +121,14 @@ fn main() -> ExitCode {
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            // Recoverable errors mean the EPUB was produced but some blocks remained
+            // untranslated. Treat them as warnings (success exit code) so automation
+            // does not stop on them. Only true fatal errors get a non-zero exit.
             if is_recoverable_error(&err) {
-                ExitCode::from(EXIT_RECOVERABLE_ERROR)
+                eprintln!("warning: {err:#}");
+                ExitCode::SUCCESS
             } else {
+                eprintln!("error: {err:#}");
                 ExitCode::FAILURE
             }
         }

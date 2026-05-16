@@ -33,6 +33,16 @@ NO_RUN="0"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            while IFS= read -r ln; do
+                case "$ln" in
+                    '#!'*) ;;
+                    '#'*) r=${ln#\#}; printf '%s\n' "${r# }" ;;
+                    *) break ;;
+                esac
+            done < "$0"
+            exit 0
+            ;;
         --cache-root) CACHE_ROOT="$2"; shift 2 ;;
         --output) OUTPUT="$2"; shift 2 ;;
         --glossary) GLOSSARY="$2"; shift 2 ;;

@@ -16,6 +16,16 @@ NO_RUN="0"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            while IFS= read -r ln; do
+                case "$ln" in
+                    '#!'*) ;;
+                    '#'*) r=${ln#\#}; printf '%s\n' "${r# }" ;;
+                    *) break ;;
+                esac
+            done < "$0"
+            exit 0
+            ;;
         --no-run) NO_RUN="1"; shift ;;
         --) shift; break ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;

@@ -22,6 +22,16 @@ INCLUDE_LIST=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            while IFS= read -r ln; do
+                case "$ln" in
+                    '#!'*) ;;
+                    '#'*) r=${ln#\#}; printf '%s\n' "${r# }" ;;
+                    *) break ;;
+                esac
+            done < "$0"
+            exit 0
+            ;;
         --dry-run) DRY_RUN="1"; shift ;;
         --yes) YES="1"; shift ;;
         --include) INCLUDE_LIST="$INCLUDE_LIST

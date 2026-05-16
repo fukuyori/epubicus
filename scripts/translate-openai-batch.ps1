@@ -51,9 +51,20 @@ param(
 
     [switch]$NoRun,
 
+    [Alias("h")]
+    [switch]$Help,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PassthroughArgs = @()
 )
+
+if ($Help) {
+    foreach ($line in (Get-Content -LiteralPath $PSCommandPath)) {
+        if ($line -match '^#') { ($line -replace '^#\s?', '') }
+        else { break }
+    }
+    exit 0
+}
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 

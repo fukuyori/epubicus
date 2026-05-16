@@ -30,6 +30,16 @@ NO_RUN="0"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            while IFS= read -r ln; do
+                case "$ln" in
+                    '#!'*) ;;
+                    '#'*) r=${ln#\#}; printf '%s\n' "${r# }" ;;
+                    *) break ;;
+                esac
+            done < "$0"
+            exit 0
+            ;;
         --min-occurrences) MIN_OCCURRENCES="$2"; shift 2 ;;
         --max-entries) MAX_ENTRIES="$2"; shift 2 ;;
         --epubicus-exe) EPUBICUS_EXE="$2"; shift 2 ;;
