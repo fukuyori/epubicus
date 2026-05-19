@@ -137,4 +137,15 @@ if [ "$NO_RUN" = "0" ]; then
     if [ -n "$EPUBICUS_EXE" ]; then "$EPUBICUS_EXE" "$@"
     else cargo run --release --quiet -- "$@"
     fi
+    scan_exit=$?
+
+    # If recover ran but rebuild was skipped due to unrecoverable items,
+    # run rebuild-from-cache to ensure the EPUB reflects the successful recoveries.
+    if [ "$SCAN_ONLY" = "0" ] && [ "$NO_REBUILD" = "0" ]; then
+        echo
+        echo "Ensuring EPUB reflects latest cache (rebuild-from-cache fallback)..."
+        "$SCRIPT_DIR/rebuild-from-cache.sh" --cache-root "$CACHE_ROOT" "$INPUT_EPUB"
+    fi
+
+    exit $scan_exit
 fi

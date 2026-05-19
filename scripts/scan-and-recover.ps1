@@ -162,14 +162,22 @@ if (-not [string]::IsNullOrWhiteSpace($GlossaryPath)) {
 }
 Write-Host ""
 
-if ($null -ne $exe) {
-    if (-not $NoRun) {
+if (-not $NoRun) {
+    if ($null -ne $exe) {
         & $exe @args
-        exit $LASTEXITCODE
-    }
-} else {
-    if (-not $NoRun) {
+    } else {
         cargo run --release --quiet -- @args
-        exit $LASTEXITCODE
     }
+    $scanExitCode = $LASTEXITCODE
+
+    # If recover ran but rebuild was skipped due to unrecoverable items,
+    # run rebuild-from-cache to ensure the EPUB reflects the successful recoveries.
+    if (-not $ScanOnly -and -not $NoRebuild) {
+        Write-Host ""
+        Write-Host "Ensuring EPUB reflects latest cache (rebuild-from-cache fallback)..."
+        $rebuildScript = Join-Path $PSScriptRoot "rebuild-from-cache.ps1"
+        & $rebuildScript -InputPath $InputEpub -CacheRoot $CacheRoot
+    }
+
+    exit $scanExitCode
 }

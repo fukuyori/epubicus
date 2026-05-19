@@ -564,6 +564,26 @@ translate コマンド時の validator が見逃した「unchanged_source」「�
 .\scripts\scan-and-recover.ps1 .\book.epub -Provider claude
 ```
 
+#### rebuild 自動 fallback
+
+`epubicus scan-recovery` の内部 rebuild は **unrecoverable 件数が 0 でないと skip** する仕様。
+そのため scan-and-recover.ps1 / .sh のラッパーは、内部 rebuild の有無に関わらず **必ず最後に `rebuild-from-cache` を呼ぶ** ようになっている（`-ScanOnly` / `-NoRebuild` / `-NoRun` 指定時を除く）。
+
+これにより:
+
+- 成功した recover 結果（cache 更新）が常に EPUB に反映される
+- `*` や `1` / `V` のような unrecoverable な passthrough ブロックが残っても、他の正常な翻訳がロストしない
+- rebuild は idempotent なので追加コストは数秒のみ
+
+実行時は次のように 2 段階のメッセージが出る:
+```
+... (scan + recover + 内部 rebuild の結果) ...
+warning: recovery left N unrecoverable item(s); ...     ← 内部 rebuild は skip された場合
+Ensuring EPUB reflects latest cache (rebuild-from-cache fallback)...
+... (rebuild-from-cache.ps1 の結果) ...
+Complete: no cache misses or untranslated blocks remain.
+```
+
 #### 通常リカバリとの違い
 
 | | recover-from-cache | scan-and-recover |
@@ -571,6 +591,7 @@ translate コマンド時の validator が見逃した「unchanged_source」「�
 | 検出タイミング | translate 中に validator がエラー判定 | translate 完了後に出力 EPUB を再検査 |
 | 検出元 | translate が書いた `recovery.jsonl` | 入力 EPUB と出力 EPUB の差分 |
 | 主な対象 | provider が API でエラー / placeholder 不一致 等 | validator を通って書き込まれたが実際は怪しい翻訳 |
+| 最終 rebuild | unrecoverable 件数 > 0 で skip（手動で `rebuild-from-cache` 必要） | ラッパーが自動で fallback rebuild を実行 |
 
 ---
 

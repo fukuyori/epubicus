@@ -60,7 +60,23 @@
       "Bash(awk '{r=sub\\(/abc/, \"X\"\\); print \"ret:\", r, \"line:\", $0}')",
       "Bash(awk '{r=gsub\\(/abc/, \"X\"\\); print \"ret:\", r, \"line:\", $0}')",
       "Bash(awk '{sub\\(/^# ?/, \"\"\\); print}')",
-      "Bash(pwsh -NoProfile -Command \"& { 'usage.ps1 -h:'; ./scripts/usage.ps1 -h 2>&1 | Select-Object -First 3; ''; 'rebuild-from-cache.ps1 -h:'; ./scripts/rebuild-from-cache.ps1 -h 2>&1 | Select-Object -First 3; ''; 'recover-from-cache.ps1 -h:'; ./scripts/recover-from-cache.ps1 -h 2>&1 | Select-Object -First 3; ''; 'translate-deepseek.ps1 -h:'; ./scripts/translate-deepseek.ps1 -h 2>&1 | Select-Object -First 3; ''; 'inspect-epub.ps1 -h:'; ./scripts/inspect-epub.ps1 -h 2>&1 | Select-Object -First 3 }\")"
+      "Bash(pwsh -NoProfile -Command \"& { 'usage.ps1 -h:'; ./scripts/usage.ps1 -h 2>&1 | Select-Object -First 3; ''; 'rebuild-from-cache.ps1 -h:'; ./scripts/rebuild-from-cache.ps1 -h 2>&1 | Select-Object -First 3; ''; 'recover-from-cache.ps1 -h:'; ./scripts/recover-from-cache.ps1 -h 2>&1 | Select-Object -First 3; ''; 'translate-deepseek.ps1 -h:'; ./scripts/translate-deepseek.ps1 -h 2>&1 | Select-Object -First 3; ''; 'inspect-epub.ps1 -h:'; ./scripts/inspect-epub.ps1 -h 2>&1 | Select-Object -First 3 }\")",
+      "Bash(pwsh -NoProfile -Command \"./scripts/inspect-epub.ps1 './test/The Centre.epub'\")",
+      "Bash(pwsh -NoProfile -Command \"./scripts/inspect-epub.ps1 './test/The Centre_jp.epub'\")",
+      "Bash(cp /tmp/the_centre_jp_test/OEBPS/c14Z.xhtml \"D:/home/source/rust/epubicus/test/c14Z_jp.xhtml\" 2>&1 && wc -l \"D:/home/source/rust/epubicus/test/c14Z_jp.xhtml\")",
+      "Bash(pwsh -NoProfile -Command \"& './scripts/rebuild-from-cache.ps1' './test/The Centre.epub'\")",
+      "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/The Centre.epub' -p deepseek -m deepseek-v4-pro\")",
+      "Bash(grep -oE '\"\\(model|provider|translated\\)\":\"[^\"]{0,80}')",
+      "Bash(grep -oE '\"\\(model|translated\\)\":\"[^\"]{0,60}')",
+      "Bash(grep -oE '^[0-9]+|\"key\":\"[a-f0-9]+|\"translated\":\"[^\"]{0,30}|\"model\":\"[^\"]+')",
+      "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/The Centre.epub' -p deepseek -ScanOnly\")",
+      "Bash(grep -oE '\"key\":\"[^\"]+\",\"translated\":\"[^\"]{0,40}|\"model\":\"[^\"]+\",\"at\":\"[^\"]+')",
+      "Bash(grep -oE '\"key\":\"[^\"]+\",\"translated\":\"[^\"]{0,30}')",
+      "Bash(grep -oE '\"key\":\"[^\"]+\",\"translated\":\"[^\"]{0,30}|\"at\":\"[^\"]+')",
+      "Bash(grep -oE '\"source_text\":\"[^\"]{0,60}' \".cache/6d3ec5d4f95d924f6502437226a60c6c/recovery/The Centre_jp/recovery.jsonl\")",
+      "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/SteveJobs.epub' -p deepseek -ScanOnly\")",
+      "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/SteveJobs.epub' -p deepseek\")",
+      "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/SteveJobs.epub' -p deepseek -NoRun\")"
     ]
   }
 }

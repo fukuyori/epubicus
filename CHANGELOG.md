@@ -25,6 +25,7 @@ All notable changes to epubicus are documented in this file.
 ### Fixed
 
 - `scan-and-recover` now requires `-Provider` explicitly (no implicit ollama default), aligning with `usage` for safer invocation in multi-provider environments.
+- `scan-and-recover.{ps1,sh}` now always runs a `rebuild-from-cache` fallback after the inner scan-recovery step so the EPUB always reflects successful cache updates, even when some blocks remain unrecoverable (the inner rebuild is skipped in that case by design). The fallback is skipped only when `-ScanOnly` / `-NoRebuild` / `-NoRun` is given.
 
 ## 0.4.4 - 2026-05-15
 
