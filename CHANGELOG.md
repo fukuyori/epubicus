@@ -2,6 +2,20 @@
 
 All notable changes to epubicus are documented in this file.
 
+## 0.4.6 - 2026-05-21
+
+### Fixed
+
+- Recovery (`recover`, invoked by `recover-from-cache` / `scan-and-recover`) no longer activates the translate-time passthrough that writes the original source into the cache when validation fails. The passthrough caused short non-translatable blocks (`*`, `1`, `IV`, `_156059028_`, bare ISBNs, etc.) to be cached as "translated", only to be rejected again by `validate_cached_translation` on the next rebuild, regenerating the same `recovery.jsonl` records and creating an apparent infinite recovery loop. Unrecoverable items are now surfaced as `failed.jsonl` instead.
+
+### Changed
+
+- Expanded the structural-passthrough whitelist used by translation, recovery, and scan-recovery so the following are accepted as-is without a provider call:
+  - Single non-whitespace characters (`*`, `1`, `A`, `-`, …).
+  - Short alphanumeric tokens up to 4 characters (`IV`, `Q1`, `Fig`, `A.`, …).
+  - Identifier-like tokens of any length that contain no ASCII letters (numeric IDs like `_156059028_`, dates like `2024-01-15`).
+  - Bare ISBN-10 / ISBN-13 digit strings, with or without hyphens (`0131103628`, `978-0-13-110362-7`, `020161622X`).
+
 ## 0.4.5 - 2026-05-16
 
 ### Changed

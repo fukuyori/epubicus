@@ -76,7 +76,8 @@
       "Bash(grep -oE '\"source_text\":\"[^\"]{0,60}' \".cache/6d3ec5d4f95d924f6502437226a60c6c/recovery/The Centre_jp/recovery.jsonl\")",
       "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/SteveJobs.epub' -p deepseek -ScanOnly\")",
       "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/SteveJobs.epub' -p deepseek\")",
-      "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/SteveJobs.epub' -p deepseek -NoRun\")"
+      "Bash(pwsh -NoProfile -Command \"& './scripts/scan-and-recover.ps1' './test/SteveJobs.epub' -p deepseek -NoRun\")",
+      "PowerShell(Get-Process epubicus -ErrorAction SilentlyContinue)"
     ]
   }
 }

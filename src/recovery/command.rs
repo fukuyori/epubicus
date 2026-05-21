@@ -57,6 +57,12 @@ pub(crate) fn recover_command(args: RecoverArgs) -> Result<()> {
     common.keep_cache = true;
     common.usage_only = false;
     common.partial_from_cache = false;
+    // Recovery must never write the original source into the cache as a
+    // "translation". Doing so would let validate_cached_translation reject the
+    // same entries on the next rebuild and regenerate identical recovery
+    // records, creating a perpetual loop. Force passthrough off here so that
+    // unrecoverable items surface as failed.jsonl records instead.
+    common.passthrough_on_validation_failure = false;
     if !validation_retries_was_explicit() {
         common.validation_retries = common.validation_retries.min(1);
     }

@@ -1699,10 +1699,80 @@ pub(crate) fn is_structural_passthrough_source(source_text: &str) -> bool {
     if looks_like_email_address(&visible) {
         return true;
     }
+    if looks_like_short_label_or_identifier(&visible) {
+        return true;
+    }
+    if looks_like_isbn_digit_string(&visible) {
+        return true;
+    }
     looks_like_reference_number_list(&text)
         || looks_like_index_entry(&text)
         || looks_like_bibliography_entry(&text)
         || looks_like_code_or_identifier_block(&text, &visible)
+}
+
+/// Whitelist short, non-translatable label-like tokens such as `*`, `1`, `IV`,
+/// `A.`, `_156059028_`. These are single visible tokens that translation
+/// providers cannot meaningfully alter, but DeepSeek and similar providers
+/// repeatedly wrap them with phrases like `Translation:` or refuse them,
+/// causing recoverable_error records to be regenerated every rebuild.
+///
+/// Rules (applied to the visible text after placeholders are stripped and
+/// whitespace is collapsed):
+///   * Empty → not a label (handled elsewhere via placeholders).
+///   * A single non-whitespace character is always a label (`*`, `1`, `-`).
+///   * Otherwise the text must be a single token (no internal whitespace)
+///     made up of ASCII alphanumerics, underscores, hyphens, or periods.
+///     Trailing periods (`A.`, `Fig.`) are tolerated.
+///   * Tokens of ≤4 visible characters qualify (Roman numerals like `IV`,
+///     short codes like `Q1`, `R&D`-style is excluded because `&` is not
+///     in the allowed set).
+///   * Tokens of any length that contain no ASCII letters qualify
+///     (numeric IDs like `_156059028_`, `2024-01-15`).
+fn looks_like_short_label_or_identifier(visible: &str) -> bool {
+    let trimmed = visible.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let char_count = trimmed.chars().count();
+    if char_count == 1 {
+        return true;
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return false;
+    }
+    let allowed = trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    if !allowed {
+        return false;
+    }
+    if char_count <= 4 {
+        return true;
+    }
+    if !trimmed.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return true;
+    }
+    false
+}
+
+/// Recognize bare ISBN-shaped digit strings such as `978-0-13-468599-3` or
+/// `0131103628`. ISBN-10/13 forms allow hyphens and a trailing `X` check
+/// digit. These appear as standalone reference values and should never
+/// require translation.
+fn looks_like_isbn_digit_string(visible: &str) -> bool {
+    let trimmed = visible.trim();
+    if trimmed.contains(char::is_whitespace) {
+        return false;
+    }
+    if !trimmed.chars().all(|ch| ch.is_ascii_digit() || ch == '-' || ch == 'X') {
+        return false;
+    }
+    let digit_count = trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_digit() || *ch == 'X')
+        .count();
+    matches!(digit_count, 10 | 13)
 }
 
 fn looks_like_email_address(text: &str) -> bool {
@@ -2106,4 +2176,107 @@ pub(crate) fn cache_key(
     hasher.update(source.as_bytes());
     let digest = hasher.finalize();
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod structural_passthrough_tests {
+    use super::{
+        is_structural_passthrough_source, looks_like_isbn_digit_string,
+        looks_like_short_label_or_identifier,
+    };
+
+    #[test]
+    fn short_label_helper_accepts_single_characters() {
+        for ch in ["*", "1", "A", "V", "-", "•"] {
+            assert!(
+                looks_like_short_label_or_identifier(ch),
+                "expected `{ch}` to be a short label"
+            );
+        }
+    }
+
+    #[test]
+    fn short_label_helper_accepts_short_alphanumeric_tokens() {
+        for token in ["IV", "Q1", "p4", "ABCD", "10", "A.", "Fig"] {
+            assert!(
+                looks_like_short_label_or_identifier(token),
+                "expected `{token}` to be a short label"
+            );
+        }
+    }
+
+    #[test]
+    fn short_label_helper_accepts_numeric_identifiers_any_length() {
+        for token in ["_156059028_", "2024-01-15", "12345", "------"] {
+            assert!(
+                looks_like_short_label_or_identifier(token),
+                "expected `{token}` to be a numeric identifier"
+            );
+        }
+    }
+
+    #[test]
+    fn short_label_helper_rejects_translatable_phrases() {
+        for phrase in [
+            "Hello World",
+            "A longer phrase with words",
+            "Steve Jobs",
+            "Excel 2024 tips",
+            "R&D",
+        ] {
+            assert!(
+                !looks_like_short_label_or_identifier(phrase),
+                "expected `{phrase}` to NOT be a short label"
+            );
+        }
+    }
+
+    #[test]
+    fn isbn_helper_accepts_isbn10_and_isbn13() {
+        for isbn in [
+            "0131103628",
+            "0-13-110362-8",
+            "9780131103627",
+            "978-0-13-110362-7",
+            "020161622X",
+        ] {
+            assert!(
+                looks_like_isbn_digit_string(isbn),
+                "expected `{isbn}` to look like an ISBN"
+            );
+        }
+    }
+
+    #[test]
+    fn isbn_helper_rejects_non_isbn_digit_strings() {
+        for not_isbn in ["12345", "12345678", "ABCDEFGHIJ", "978-0-13-110362-7-extra"] {
+            assert!(
+                !looks_like_isbn_digit_string(not_isbn),
+                "expected `{not_isbn}` to NOT look like an ISBN"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_passthrough_covers_new_whitelist_sources() {
+        for source in [
+            "*",
+            "1",
+            "IV",
+            "_156059028_",
+            "978-0-13-110362-7",
+            "Fig.",
+        ] {
+            assert!(
+                is_structural_passthrough_source(source),
+                "expected `{source}` to be structural passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_passthrough_still_rejects_translatable_prose() {
+        let prose = "The student will sometimes use an implied author encountered only in government forms.";
+        assert!(!is_structural_passthrough_source(prose));
+    }
 }
